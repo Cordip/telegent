@@ -155,16 +155,35 @@ class Conf:
         with open(self.path, encoding="utf-8-sig") as f:
             c = json.load(f)
         c["server"] = url
-        tmp = self.path + ".tmp"
+        tmp = f"{self.path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(c, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
+        if not replace_file(tmp, self.path):
+            print(f"tg: предупреждение: не удалось записать {self.path} (файл занят другим процессом)", file=sys.stderr)
 
     def save_state(self, st):
-        tmp = self.state_path + ".tmp"
+        # a second watch on the same state file must not kill this one: the state is rewritten on the next message anyway
+        tmp = f"{self.state_path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(st, f)
-        os.replace(tmp, self.state_path)
+        replace_file(tmp, self.state_path)
+
+
+def replace_file(tmp, path, tries=8):
+    """os.replace that survives a Windows sharing violation: another process (a second watch, an antivirus scan) may
+    hold the destination open for a moment, and os.replace then raises PermissionError. The temp name is per process
+    (two writers never share it); retry briefly, then give up quietly and drop the temp file."""
+    for i in range(tries):
+        try:
+            os.replace(tmp, path)
+            return True
+        except PermissionError:
+            time.sleep(0.05 * (i + 1))
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False
 
 
 def host_tag():
