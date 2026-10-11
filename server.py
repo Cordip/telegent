@@ -368,7 +368,9 @@ def create_invite(by, name, kind=None, owner=None, pid=None, reset=False):
         raise ApiError(400, "имя: латиница, цифры, . _ -, до 32 символов, например masha или masha-agent")
     with DB_LOCK:
         con = db()
-        u = con.execute("SELECT * FROM users WHERE name = ?", (name,)).fetchone()
+        u = con.execute("SELECT * FROM users WHERE lower(name) = lower(?)", (name,)).fetchone()
+        if u:
+            name = u["name"]   # names are matched without case: "Bob" means the existing "bob"
         if u and u["revoked"]:
             raise ApiError(400, f"{name} отозван; заведи новое имя")
         role = None
@@ -424,10 +426,32 @@ def live_invite(code):
     return inv
 
 
-def redeem_invite(code, password=None, label="", me=None):
-    """new: a session (person) or a token (agent); add: joins the project (me must be that account); reset: as new."""
+def redeem_invite(code, password=None, label="", me=None, as_existing=False):
+    """new: a session (person) or a token (agent); add: joins the project (me must be that account); reset: as new.
+    as_existing: a person who already has an account takes a 'new' invite with it (the inviter guessed a name
+    that is not theirs) - they join the project as themselves, no second account."""
     inv = live_invite(code)
     name, kind, purpose = inv["name"], inv["kind"], inv["purpose"]
+    if as_existing:
+        if purpose != "new" or kind != "human":
+            raise ApiError(400, "так можно принять только приглашение нового человека в проект")
+        if not me or me["kind"] != "human":
+            raise ApiError(401, "войди в свой аккаунт, чтобы принять приглашение им")
+        if member_role(inv["project_id"], me["name"]):
+            raise ApiError(409, f"ты уже в проекте «{inv['project_title']}»")
+        with DB_LOCK:
+            con = db()
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                if con.execute("SELECT used_ts FROM invites WHERE code_hash = ?", (inv["code_hash"],)).fetchone()["used_ts"]:
+                    raise ApiError(410, "приглашение уже использовано")
+                con.execute("UPDATE invites SET used_ts = ? WHERE code_hash = ?", (time.time(), inv["code_hash"]))
+                add_member(con, inv["project_id"], me["name"], "member", inv["created_by"])
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+        return {"name": me["name"], "kind": "human", "purpose": "add", "project": inv["project_slug"]}
     if purpose == "add":
         if not me or me["name"] != name:
             raise ApiError(401, f"это приглашение в проект для {name}: войди как {name} и открой ссылку снова")
@@ -444,7 +468,7 @@ def redeem_invite(code, password=None, label="", me=None):
             con.execute("UPDATE invites SET used_ts = ? WHERE code_hash = ?", (time.time(), inv["code_hash"]))
             pw = hash_password(password) if kind == "human" and purpose != "add" else None
             if purpose == "new":
-                if con.execute("SELECT 1 FROM users WHERE name = ?", (name,)).fetchone():
+                if con.execute("SELECT 1 FROM users WHERE lower(name) = lower(?)", (name,)).fetchone():
                     raise ApiError(409, f"{name} уже есть")
                 con.execute("INSERT INTO users(name, kind, owner, token_hash, created_ts, pw_hash) VALUES (?,?,?,?,?,?)",
                             (name, kind, inv["owner"], token_hash(tok), time.time(), pw))
@@ -1165,7 +1189,8 @@ def api_join(h, user, q, data):
     me = None
     if h.headers.get("Authorization"):
         me = h.auth()
-    return redeem_invite(str(data.get("code") or ""), data.get("password"), h.headers.get("User-Agent", ""), me)
+    return redeem_invite(str(data.get("code") or ""), data.get("password"), h.headers.get("User-Agent", ""), me,
+                         bool(data.get("as_existing")))
 
 
 # ---- projects and their members
@@ -1228,6 +1253,75 @@ def api_members(h, user, q, data):
     p = project_for(h, user, q)
     with DB_LOCK:
         return {"project": project_dict(p), "members": users_with_presence(p["id"])}
+
+
+@route("POST", "/api/project/delete")
+def api_project_delete(h, user, q, data):
+    """Owner only, confirmed by typing the project's name (title or slug). Everything of the project goes;
+    its agents stay as accounts without a project (their person can add them to another one)."""
+    p = project_for(h, user, q)
+    require_owner(p)
+    typed = str(data.get("confirm") or "").strip().lower()
+    if typed not in (p["slug"].lower(), p["title"].strip().lower()):
+        raise ApiError(400, f"для подтверждения введи название проекта: {p['title']}")
+    with DB_LOCK:
+        con = db()
+        pid = p["id"]
+        agents = [r["user"] for r in con.execute("SELECT user FROM members WHERE project_id = ? AND role = 'agent'", (pid,))]
+        n = con.execute("SELECT COUNT(*) FROM messages WHERE project_id = ?", (pid,)).fetchone()[0]
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            for table in ("attachments", "receipts", "approvals"):
+                con.execute(f"DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE project_id = ?)", (pid,))
+            for table in ("messages", "board", "claims", "invites", "members"):
+                con.execute(f"DELETE FROM {table} WHERE project_id = ?", (pid,))
+            con.execute("DELETE FROM projects WHERE id = ?", (pid,))
+            con.execute("COMMIT")
+        except Exception:
+            con.execute("ROLLBACK")
+            raise
+    return {"ok": True, "deleted": p["slug"], "messages": n, "agents_without_project": agents}
+
+
+def addable(con, me, pid):
+    """Who a project's owner may add directly, without a link: people who already share a project with
+    them, and their own agents that have no project (an agent lives in one project)."""
+    people = con.execute(
+        "SELECT u.name, GROUP_CONCAT(DISTINCT p.title) AS via FROM members mine "
+        "JOIN members other ON other.project_id = mine.project_id AND other.user != mine.user "
+        "JOIN users u ON u.name = other.user AND u.kind = 'human' AND u.revoked = 0 "
+        "JOIN projects p ON p.id = mine.project_id "
+        "WHERE mine.user = ? AND NOT EXISTS (SELECT 1 FROM members x WHERE x.project_id = ? AND x.user = u.name) "
+        "GROUP BY u.name ORDER BY u.name", (me["name"], pid)).fetchall()
+    agents = con.execute(
+        "SELECT name FROM users u WHERE kind = 'agent' AND owner = ? AND revoked = 0 "
+        "AND NOT EXISTS (SELECT 1 FROM members x WHERE x.user = u.name) ORDER BY name", (me["name"],)).fetchall()
+    return ([{"name": r["name"], "kind": "human", "via": (r["via"] or "").split(",")} for r in people] +
+            [{"name": r["name"], "kind": "agent", "via": []} for r in agents])
+
+
+@route("GET", "/api/members/candidates")
+def api_member_candidates(h, user, q, data):
+    p = project_for(h, user, q)
+    require_owner(p)
+    with DB_LOCK:
+        return {"candidates": addable(db(), user, p["id"])}
+
+
+@route("POST", "/api/members/add")
+def api_member_add(h, user, q, data):
+    p = project_for(h, user, q)
+    require_owner(p)
+    name = str(data.get("name") or "")
+    with DB_LOCK:
+        con = db()
+        ok = next((c for c in addable(con, user, p["id"]) if c["name"] == name), None)
+        if not ok:
+            raise ApiError(403, f"напрямую добавляются только люди из твоих общих проектов и твои агенты без проекта; "
+                                f"{name} пригласи ссылкой")
+        add_member(con, p["id"], name, "agent" if ok["kind"] == "agent" else "member", user["name"])
+    insert_message(user, h.host(), {"body": f"Добавил(а) {name} в проект.", "type": "info"}, p["id"])
+    return {"ok": True}
 
 
 def owners_left(pid, without):

@@ -231,9 +231,11 @@ results journal and members. Members of one project never see another one: not i
 attachments or people, not even that it exists.
 
 - **Any person** can create a project ("+ New" in the left column) and becomes its **owner**.
-- Owners invite people and agents. An existing account accepts the invite by logging in, so
-  one person can be in many projects. Owners also remove members and make or unmake owners;
-  anyone can leave.
+- Owners invite people and agents. People who already share a project with the owner, and the
+  owner's agents without a project, are added in one click ("+ Invite" lists them); anyone else gets
+  a one-time link (an existing account accepts it by logging in). Owners also remove members, make or
+  unmake owners and delete the project (confirmed by typing its name; agents of a deleted project stay
+  as accounts without a project); anyone can leave.
 - **An agent** belongs to exactly one project and cannot create projects. Two agents of one
   person on one machine are two accounts; `tg.py join "<link>" --here`, run in each repository,
   writes a `.telegent.json` there, and `tg.py` picks it up from the current folder.

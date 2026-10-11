@@ -84,6 +84,7 @@ th { color: var(--muted); font-weight: 600; font-size: 12px; }
 .tablewrap { overflow-x: auto; }
 #login, #join { max-width: 420px; margin: 12vh auto; padding: 0 16px; }
 #login input, #join input { width: 100%; margin: 8px 0; }
+#join #joinLogin button { width: 100%; }
 /* app shell: header, then [feed column | side panel]; only the feed scrolls, the composer stays at the bottom */
 #app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
 #app header { flex: none; position: static; }
@@ -354,6 +355,13 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
       <input id="joinPw2" type="password" autocomplete="new-password" placeholder="ещё раз">
       <button class="primary" id="joinBtn" type="submit">Войти</button>
     </form>
+    <p id="joinHave" class="hidden" style="margin:12px 0 0;font-size:13px">Уже есть аккаунт в telegent?
+      <a href="#" id="joinHaveLink">Войди и вступи им</a> — второй аккаунт не нужен.</p>
+    <form id="joinLogin" class="hidden">
+      <input id="joinLName" name="username" autocomplete="username" placeholder="твоё имя" autocapitalize="off">
+      <input id="joinLPw" type="password" autocomplete="current-password" placeholder="твой пароль">
+      <button class="primary" type="submit">Войти и вступить в проект</button>
+    </form>
     <div id="joinAgent" class="hidden">
       <p class="muted" style="margin:0 0 6px">Это приглашение для агента. Передай ему команду (она одноразовая):</p>
       <input id="joinCmd" readonly style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12.5px">
@@ -365,7 +373,14 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 <div id="invDialog" class="hidden" style="position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px">
   <div class="panel" style="width:100%;max-width:440px">
     <h2 style="font-size:16px;margin:0 0 10px">Пригласить</h2>
-    <input id="invName" placeholder="имя: masha или masha-agent" autocapitalize="off" style="width:100%;margin-bottom:8px">
+    <div id="invPick" class="hidden">
+      <p class="muted" style="font-size:12.5px;margin:0 0 6px">Из твоих проектов — добавятся сразу, без ссылки:</p>
+      <div id="invCands" style="max-height:220px;overflow-y:auto;margin-bottom:10px"></div>
+      <p class="muted" style="font-size:12.5px;margin:0 0 6px;border-top:1px solid var(--line);padding-top:10px">
+        Или пригласи по ссылке нового человека или агента:</p>
+    </div>
+    <input id="invName" list="invNames" placeholder="имя: начни вводить — подскажу знакомых" autocapitalize="off" autocomplete="off" style="width:100%;margin-bottom:8px">
+    <datalist id="invNames"></datalist>
     <div id="invNew" class="row" style="display:flex;gap:6px;margin-bottom:8px">
       <select id="invKind" style="flex:1"><option value="human">человек</option><option value="agent">агент</option></select>
       <select id="invOwner" style="flex:1" title="чей агент"></select>
@@ -394,6 +409,18 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
       Участники проекта видят только его, другие проекты для них не существуют.</p>
     <div class="actions"><button class="primary" id="npCreate">Создать</button><button id="npCancel">Отмена</button></div>
     <div class="err" id="npErr"></div>
+  </div>
+</div>
+
+<div id="pdDialog" class="hidden" style="position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px">
+  <div class="panel" style="width:100%;max-width:420px">
+    <h2 style="font-size:16px;margin:0 0 8px;color:var(--urgent)">Удалить проект</h2>
+    <p style="margin:0 0 8px;font-size:13.5px">Удалится всё, что есть в проекте «<b id="pdTitle"></b>»: сообщения, вложения, доска,
+      заявки и приглашения. Участники потеряют к нему доступ, агенты проекта останутся без проекта. <b>Отменить нельзя.</b></p>
+    <label class="muted" style="font-size:12.5px">Чтобы подтвердить, введи название проекта:</label>
+    <input id="pdConfirm" autocomplete="off" style="width:100%;margin:6px 0 10px">
+    <div class="actions"><button class="bad" id="pdDelete" disabled>Удалить навсегда</button><button id="pdCancel">Отмена</button></div>
+    <div class="err" id="pdErr"></div>
   </div>
 </div>
 
@@ -581,7 +608,7 @@ $("menuBg").onclick = closeMenu;
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeMenu();
-    for (const id of ["invDialog", "pwDialog", "npDialog"]) $(id).classList.add("hidden");
+    for (const id of ["invDialog", "pwDialog", "npDialog", "pdDialog"]) $(id).classList.add("hidden");
     $("projects").classList.remove("open"); $("aside").classList.remove("open");
     if (REPLY && document.activeElement === $("cBody")) resetCompose();
   }
@@ -1007,7 +1034,7 @@ document.addEventListener("click", async e => {
       }
       case "memmenu": openMenu(MEMBER_ACTS[el.dataset.name] || [], el, esc(el.dataset.name)); break;
       case "proj": if (el.dataset.slug !== PROJECT) await setProject(el.dataset.slug); else $("projects").classList.remove("open"); break;
-      case "mrole": case "mremove": case "mreset": case "prename": case "pleave": case "mrename":
+      case "mrole": case "mremove": case "mreset": case "prename": case "pleave": case "mrename": case "pdelete": case "madd":
         await memberAction(el.dataset.act, el.dataset.name, el.dataset.role); break;
       case "approve": case "deny": {
         const note = prompt(el.dataset.act === "approve" ? "Одобрить. Комментарий (необязательно):" : "Отказать. Причина:");
@@ -1172,7 +1199,8 @@ async function loadPresence() {
         (acts.length ? `<button class="more" data-act="memmenu" data-name="${esc(u.name)}" title="действия">⋯</button>` : "") + `</div>`;
     }).join("");
     $("projActions").innerHTML = (owner ? `<a href="#" data-act="prename">переименовать проект</a> · ` : "") +
-      `<a href="#" data-act="pleave">покинуть проект</a>`;
+      `<a href="#" data-act="pleave">покинуть проект</a>` +
+      (owner ? ` · <a href="#" data-act="pdelete" style="color:var(--urgent)">удалить проект</a>` : "");
   } catch {}
 }
 
@@ -1181,6 +1209,18 @@ async function memberAction(act, name, role) {
   if (act === "mremove") {
     if (!confirm(`Убрать ${name} из проекта «${ME.project.title}»? Его агенты в этом проекте тоже уйдут.`)) return;
     await api("POST", "/api/members/remove", {name});
+  }
+  if (act === "pdelete") {
+    $("pdTitle").textContent = ME.project.title; $("pdConfirm").value = ""; $("pdErr").textContent = "";
+    $("pdDelete").disabled = true;
+    $("pdDialog").classList.remove("hidden"); $("pdConfirm").focus();
+    return;
+  }
+  if (act === "madd") {
+    await api("POST", "/api/members/add", {name});
+    toast(`${name} добавлен(а) в проект`);
+    await loadPresence(); setupCompose(); loadCandidates();
+    return;
   }
   if (act === "pleave") {
     if (!confirm(`Покинуть проект «${ME.project.title}»? Вернуться можно только по новому приглашению.`)) return;
@@ -1213,22 +1253,65 @@ async function memberAction(act, name, role) {
 }
 
 // ---- invites (project owners): new people / agents, or existing accounts, into this project
+// ---- deleting a project: confirmed by typing its name
+$("pdConfirm").oninput = () => {
+  const v = $("pdConfirm").value.trim().toLowerCase();
+  $("pdDelete").disabled = !(v && (v === ME.project.title.trim().toLowerCase() || v === PROJECT));
+};
+$("pdCancel").onclick = () => $("pdDialog").classList.add("hidden");
+$("pdDelete").onclick = async () => {
+  $("pdErr").textContent = "";
+  try {
+    const d = await api("POST", "/api/project/delete", {confirm: $("pdConfirm").value});
+    $("pdDialog").classList.add("hidden");
+    toast(`Проект удалён` + (d.agents_without_project.length ? `; без проекта: ${d.agents_without_project.join(", ")}` : ""));
+    st.set("tg_seen_" + PROJECT, null);
+    PROJECTS = PROJECTS.filter(p => p.slug !== PROJECT);
+    await loadProjects();
+    if (PROJECTS.length) await setProject(PROJECTS[0].slug); else showNoProject();
+  } catch (err) { $("pdErr").textContent = err.message; }
+};
+
+// people from my other projects (and my agents without a project) can be added in one click
+let CANDS = [];
+async function loadCandidates() {
+  try {
+    const c = (await api("GET", "/api/members/candidates")).candidates;
+    CANDS = c;
+    $("invNames").innerHTML = c.map(u => `<option value="${esc(u.name)}">${u.kind === "agent" ? "твой агент" : "из " + esc(u.via.join(", "))}</option>`).join("");
+    invNameChanged();
+    $("invPick").classList.toggle("hidden", !c.length);
+    $("invCands").innerHTML = c.map(u => `<div class="member">${avatar(u.name, u.kind, true)}
+      <div class="minfo"><b>${esc(u.name)}</b><div class="muted">${u.kind === "agent" ? "твой агент, без проекта"
+        : "из " + u.via.map(t => "«" + esc(t) + "»").join(", ")}</div></div>
+      <button data-act="madd" data-name="${esc(u.name)}">Добавить</button></div>`).join("");
+  } catch { $("invPick").classList.add("hidden"); }
+}
+
 function openInvite(name) {
   $("invName").value = name || ""; $("invErr").textContent = ""; $("invResult").classList.add("hidden");
   $("invOwner").innerHTML = ME.users.filter(u => u.kind === "human").map(u =>
     `<option value="${esc(u.name)}" ${u.name === ME.name ? "selected" : ""}>агент для ${esc(u.name)}</option>`).join("");
   invNameChanged();
+  $("invPick").classList.add("hidden"); loadCandidates();
   $("invDialog").classList.remove("hidden");
-  $("invName").focus();
+  if (!TOUCH) $("invName").focus();
 }
+// someone I already work with: add at once; anyone else: a one-time link
+const typedCand = () => { const v = $("invName").value.trim().toLowerCase(); return CANDS.find(c => c.name.toLowerCase() === v); };
 function invNameChanged() {
-  const u = ME.users.find(x => x.name === $("invName").value.trim());
-  $("invNew").style.display = u ? "none" : "flex";
+  const v = $("invName").value.trim().toLowerCase();
+  const u = ME.users.find(x => x.name.toLowerCase() === v);
+  const cand = typedCand();
+  $("invNew").style.display = u || cand ? "none" : "flex";
   $("invCreate").classList.toggle("hidden", !!u);
+  $("invCreate").textContent = cand ? "Добавить в проект" : "Создать ссылку";
   $("invOwner").style.visibility = $("invKind").value === "agent" ? "visible" : "hidden";
   $("invNote").textContent = u ? `${u.name} уже в проекте.`
-    : `В проект «${ME.project.title}». Если такое имя уже есть на сервере, человек войдёт своим паролем и окажется в проекте; ` +
-      `если нет, придумает пароль. Ссылка одноразовая, 7 дней.`;
+    : cand ? (cand.kind === "agent" ? `${cand.name} — твой агент без проекта: добавится сразу.`
+                                    : `${cand.name} уже работает с тобой в «${cand.via.join("», «")}»: добавится сразу, без ссылки.`)
+    : `Новый человек или агент в «${ME.project.title}»: получит одноразовую ссылку на 7 дней. ` +
+      `Если у него уже есть аккаунт, по ссылке он войдёт им, второй аккаунт не появится.`;
 }
 function showInviteResult(d) {
   const agent = d.kind === "agent";
@@ -1255,6 +1338,16 @@ $("invKind").onchange = invNameChanged;
 $("invClose").onclick = () => $("invDialog").classList.add("hidden");
 $("invCreate").onclick = async () => {
   $("invErr").textContent = "";
+  const cand = typedCand();
+  if (cand) {
+    try {
+      await api("POST", "/api/members/add", {name: cand.name});
+      toast(`${cand.name} добавлен(а) в проект`);
+      $("invDialog").classList.add("hidden");
+      await loadPresence(); setupCompose();
+    } catch (err) { $("invErr").textContent = err.message; }
+    return;
+  }
   try {
     showInviteResult(await api("POST", "/api/invites", {name: $("invName").value.trim(), kind: $("invKind").value,
                                                         owner: $("invOwner").value}));
@@ -1294,6 +1387,54 @@ async function joinFlow(code) {
     : add ? (mine ? `${inv.name}, тебя приглашают${where}.` : `${inv.name}, тебя приглашают${where}. Войди своим паролем.`)
     : `${inv.name}, задай новый пароль: дальше входи по имени и этому паролю.`;
   $("joinName").value = inv.name;
+  // a 'new' invite may reach someone who already has an account (the inviter guessed a name): let them join as themselves
+  if (inv.purpose === "new") {
+    let me = null;
+    const stored = st.get("tg_token");
+    if (stored) {
+      try { const r2 = await fetch("/api/me", {headers: {"Authorization": "Bearer " + stored}}); if (r2.ok) me = await r2.json(); } catch {}
+    }
+    $("joinHave").classList.remove("hidden");
+    if (me && me.kind === "human") {
+      $("joinHave").innerHTML = `Это ты, <b>${esc(me.name)}</b>? <a href="#" id="joinAsMe">Вступить в проект своим аккаунтом</a> — второй аккаунт не нужен.`;
+      $("joinAsMe").onclick = async e => {
+        e.preventDefault(); $("joinErr").textContent = "";
+        try {
+          const r3 = await fetch("/api/join", {method: "POST", headers: {"Content-Type": "application/json", "Authorization": "Bearer " + stored},
+            body: JSON.stringify({code, as_existing: true})});
+          const d = await r3.json().catch(() => ({}));
+          if (!r3.ok) throw new Error(d.error || `HTTP ${r3.status}`);
+          if (d.project) st.set("tg_project", d.project);
+          $("join").classList.add("hidden");
+          if (launcher()) { location.replace(launcher() + "#token=" + stored); return; }
+          await login(stored);
+        } catch (err) { $("joinErr").textContent = err.message; }
+      };
+    } else {
+      $("joinHaveLink").onclick = e => {
+        e.preventDefault();
+        $("joinForm").classList.add("hidden"); $("joinHave").classList.add("hidden");
+        $("joinLogin").classList.remove("hidden"); $("joinLName").focus();
+      };
+      $("joinLogin").onsubmit = async e => {
+        e.preventDefault(); $("joinErr").textContent = "";
+        try {
+          const r4 = await fetch("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({name: $("joinLName").value.trim(), password: $("joinLPw").value})});
+          const lg = await r4.json().catch(() => ({}));
+          if (!r4.ok) throw new Error(lg.error || `HTTP ${r4.status}`);
+          const r5 = await fetch("/api/join", {method: "POST", headers: {"Content-Type": "application/json", "Authorization": "Bearer " + lg.token},
+            body: JSON.stringify({code, as_existing: true})});
+          const d = await r5.json().catch(() => ({}));
+          if (!r5.ok) throw new Error(d.error || `HTTP ${r5.status}`);
+          if (d.project) st.set("tg_project", d.project);
+          $("join").classList.add("hidden");
+          if (launcher()) { location.replace(launcher() + "#token=" + lg.token); return; }
+          await login(lg.token);
+        } catch (err) { $("joinErr").textContent = err.message; }
+      };
+    }
+  }
   $("joinPw").placeholder = add ? "твой пароль" : "придумай пароль (от 8 символов)";
   $("joinPw").autocomplete = add ? "current-password" : "new-password";
   $("joinPw").classList.toggle("hidden", !!mine);

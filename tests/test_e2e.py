@@ -545,6 +545,48 @@ def main():
         check(http("POST", "/api/login", {"name": "alicia", "password": "renamed pass 1"})[0] == 200 and
               http("POST", "/api/login", {"name": "alice", "password": "renamed pass 1"})[0] == 401,
               "login goes by the new name, the old one no longer works")
+        # adding people one already works with, and deleting a project
+        def hp(method, path, body=None, tok=None, project=None):
+            req = urllib.request.Request(url + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                         headers={"Content-Type": "application/json",
+                                                  **({"X-Telegent-Project": project} if project else {}),
+                                                  **({"Authorization": "Bearer " + tok} if tok else {})})
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read() or b"{}")
+        code, d = hp("POST", "/api/projects", {"title": "Trio"}, human_tok)
+        check(code == 200 and d["project"]["slug"] == "trio", "a new project for the next checks")
+        code, d = hp("GET", "/api/members/candidates", tok=human_tok, project="trio")
+        names = {c["name"] for c in d["candidates"]}
+        check("bob" in names and "carol" not in names, f"people from shared projects are offered ({sorted(names)})")
+        check(hp("POST", "/api/members/add", {"name": "carol"}, human_tok, "trio")[0] == 403,
+              "someone without a shared project needs a link")
+        code, _ = hp("POST", "/api/members/add", {"name": "bob"}, human_tok, "trio")
+        check(code == 200 and "trio" in [x["slug"] for x in hp("GET", "/api/projects", tok=bob_tok)[1]["projects"]],
+              "a shared-project person is added in one click")
+        check(hp("POST", "/api/members/add", {"name": "masha"}, bob_tok, "trio")[0] == 403, "only owners add")
+        code, d = hp("POST", "/api/invites", {"name": "MASHA"}, human_tok, "trio")
+        check(code == 200 and d["purpose"] == "add" and d["name"] == "masha", "invites match names without case")
+        code, d = hp("POST", "/api/invites", {"name": "guessed-name"}, human_tok, "trio")
+        check(d["purpose"] == "new", "an unknown name gets a new-person invite")
+        code, j = hp("POST", "/api/join", {"code": d["code"], "as_existing": True}, carol)
+        check(code == 200 and j["name"] == "carol" and j["project"] == "trio",
+              "someone with an account takes a new-person invite as themselves")
+        check(hp("GET", "/api/me", tok=carol, project="trio")[0] == 200, "and is in the project")
+        check(not any(u["name"] == "guessed-name" for u in hp("GET", "/api/me", tok=human_tok, project="trio")[1]["users"]),
+              "no second account appeared")
+        code, d = hp("POST", "/api/messages", {"body": "в trio"}, human_tok, "trio")
+        trio_msg = d["id"]
+        check(hp("POST", "/api/project/delete", {"confirm": "trio"}, bob_tok, "trio")[0] == 403, "only owners delete")
+        check(hp("POST", "/api/project/delete", {"confirm": "wrong"}, human_tok, "trio")[0] == 400,
+              "deleting needs the project's name typed")
+        code, d = hp("POST", "/api/project/delete", {"confirm": "Trio"}, human_tok, "trio")
+        check(code == 200 and d["deleted"] == "trio", "the owner deletes the project")
+        check("trio" not in [x["slug"] for x in hp("GET", "/api/projects", tok=bob_tok)[1]["projects"]],
+              "members lose the project")
+        check(hp("GET", f"/api/messages/{trio_msg}", tok=human_tok)[0] == 404, "its messages are gone")
         print("\nALL OK")
     finally:
         if watcher:
