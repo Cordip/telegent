@@ -243,6 +243,10 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .mappr { border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); background: var(--warn-bg); border-radius: 8px;
   padding: 7px 9px; margin: 6px 0 2px; font-size: 13px; }
 .mappr .actions { margin-top: 6px; }
+@media (max-width: 480px) {
+  .mappr .actions { flex-wrap: nowrap; }
+  .mappr .actions button { flex: 1 1 0; min-height: 40px; font-size: 14px; }
+}
 .mrc { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 .mrc .ok2 { color: var(--accent); }
 .mrc.soft { visibility: hidden; height: 0; margin: 0; }
@@ -518,6 +522,7 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
               <input type="text" id="cTopic" list="topicList" placeholder="#топик" title="топик">
               <label class="tog" title="меняет чужую работу прямо сейчас"><input type="checkbox" id="cUrgent"> срочно</label>
               <label class="tog" title="деньги или необратимое: исполнитель ждёт «да» своего человека"><input type="checkbox" id="cApproval"> нужно одобрение</label>
+              <select id="cApprover" class="hidden" title="кто решает"></select>
             </div>
           </div>
           <datalist id="topicList"></datalist>
@@ -789,6 +794,8 @@ function setupCompose() {
   $("fType").innerHTML = `<option value="">все типы</option>` + Object.keys(TYPES).map(t => `<option value="${t}">${TYPES[t]}</option>`).join("");
   $("cTo").innerHTML = `<option value="">всем</option>` + ME.users.filter(u => u.name !== ME.name)
     .map(u => `<option value="${esc(u.name)}">${esc(u.name)}</option>`).join("");
+  $("cApprover").innerHTML = `<option value="">кто решает: любой человек</option>` + ME.users.filter(u => u.kind === "human")
+    .map(u => `<option value="${esc(u.name)}">кто решает: ${esc(u.name)}</option>`).join("");
 }
 
 function filterQuery() {
@@ -946,8 +953,11 @@ function row(m, prev) {
   }
   if (m.needs_approval) {
     const decided = m.approvals.map(a => `${a.decision === "approve" ? "✔ одобрил" : "✘ отказал"} ${esc(a.by)} ${hhmm(a.time)}${a.note ? ": " + esc(a.note) : ""}`);
-    html += `<div class="mappr"><b>Нужно одобрение человека.</b> ${decided.length ? decided.join("; ") : "Решения пока нет."}` +
-      (ME.kind === "human" ? `<div class="actions"><button class="ok" data-act="approve" data-id="${m.id}">Одобрить</button>` +
+    const canDecide = ME.kind === "human" && (!m.approver || m.approver === ME.name);
+    const head = m.approver ? `Нужно одобрение: ${esc(m.approver)}.` : "Нужно одобрение человека.";
+    html += `<div class="mappr"><b>${head}</b> ${decided.length ? decided.join("; ") : "Решения пока нет."}` +
+      (ME.kind === "human" && !canDecide ? ` <span class="muted">Решает ${esc(m.approver)}.</span>` : "") +
+      (canDecide ? `<div class="actions"><button class="ok" data-act="approve" data-id="${m.id}">Одобрить</button>` +
         `<button class="bad" data-act="deny" data-id="${m.id}">Отказать</button></div>` : "") + `</div>`;
   }
   if ((m.receipts || []).length) {   // delivery to each addressee: people oversee who got what
@@ -972,7 +982,7 @@ function row(m, prev) {
 // everything one can do with a message (the ⋯ menu, and a tap on phones)
 function actionsFor(m) {
   const a = [{label: "↩ Ответить", act: "reply", data: {id: m.id}}, {label: "≡ Вся ветка", act: "thread", data: {id: m.thread_id}}];
-  if (m.needs_approval && ME.kind === "human") {
+  if (m.needs_approval && ME.kind === "human" && (!m.approver || m.approver === ME.name)) {
     a.push({label: "✔ Одобрить", act: "approve", data: {id: m.id}, cls: "ok"});
     a.push({label: "✘ Отказать", act: "deny", data: {id: m.id}, cls: "bad"});
   }
@@ -1091,7 +1101,8 @@ function updateChips() {
   if ($("cType").value !== "info") chips.push(["type", TYPES[$("cType").value]]);
   if ($("cTopic").value.trim()) chips.push(["topic", "#" + $("cTopic").value.trim().replace(/^#/, "")]);
   if ($("cUrgent").checked) chips.push(["urgent", "срочно"]);
-  if ($("cApproval").checked) chips.push(["approval", "нужно одобрение"]);
+  if ($("cApproval").checked) chips.push(["approval", "нужно одобрение" + ($("cApprover").value ? ": " + $("cApprover").value : "")]);
+  $("cApprover").classList.toggle("hidden", !$("cApproval").checked);
   $("cChips").innerHTML = chips.map(([k, t]) => `<span class="cchip">${esc(t)}<button type="button" data-chip="${k}" title="убрать">✕</button></span>`).join("");
   $("cOptsBtn").classList.toggle("on", chips.length > 0 || !$("cOpts").classList.contains("hidden"));
   $("cBody").placeholder = REPLY ? `Ответ ${REPLY.author}…` : ME && ME.project ? `Сообщение в «${ME.project.title}»` : "Сообщение";
@@ -1102,11 +1113,11 @@ $("cChips").onclick = e => {
   if (k === "type") $("cType").value = "info";
   if (k === "topic") $("cTopic").value = "";
   if (k === "urgent") $("cUrgent").checked = false;
-  if (k === "approval") $("cApproval").checked = false;
+  if (k === "approval") { $("cApproval").checked = false; $("cApprover").value = ""; }
   updateChips();
 };
 $("cOptsBtn").onclick = () => { $("cOpts").classList.toggle("hidden"); updateChips(); };
-for (const id of ["cType", "cTopic", "cUrgent", "cApproval"]) $(id).addEventListener("change", updateChips);
+for (const id of ["cType", "cTopic", "cUrgent", "cApproval", "cApprover"]) $(id).addEventListener("change", updateChips);
 $("cTopic").addEventListener("input", updateChips);
 
 function startReply(m) {
@@ -1120,7 +1131,7 @@ function startReply(m) {
 function resetCompose() {
   REPLY = null; $("replyBar").classList.add("hidden");
   $("cBody").value = ""; $("cFiles").value = ""; $("cFilesInfo").textContent = ""; $("cTo").value = "";
-  $("cUrgent").checked = false; $("cApproval").checked = false; $("sendErr").textContent = "";
+  $("cUrgent").checked = false; $("cApproval").checked = false; $("cApprover").value = ""; $("sendErr").textContent = "";
   $("cType").value = "info"; $("cTopic").value = ""; $("cOpts").classList.add("hidden");
   updateChips();
   growBody();
@@ -1161,6 +1172,7 @@ $("sendBtn").onclick = async () => {
   const data = {
     type: $("cType").value, topic: $("cTopic").value.trim().replace(/^#/, ""), body: $("cBody").value,
     priority: $("cUrgent").checked ? "urgent" : "normal", needs_approval: $("cApproval").checked,
+    approver: $("cApproval").checked && $("cApprover").value ? $("cApprover").value : null,
     to: $("cTo").value ? [$("cTo").value] : [], attachments,
     reply_to: REPLY ? REPLY.id : null, idem_key: crypto.randomUUID ? crypto.randomUUID() : String(Math.random()),
   };
@@ -1494,11 +1506,11 @@ async function refreshSide() {
     const cur = $("fTopic").value;
     $("fTopic").innerHTML = `<option value="">все топики</option>` + topics.map(t => `<option ${t === cur ? "selected" : ""}>${esc(t)}</option>`).join("");
     $("topicList").innerHTML = topics.map(t => `<option value="${esc(t)}">`).join("");
-    const pend = await api("GET", "/api/messages?pending_approval=1&limit=100&full=0");
+    const pend = await api("GET", "/api/messages?pending_approval=" + (ME.kind === "human" ? "mine" : "1") + "&limit=100&full=0");
     const n = pend.messages.length;
     $("pendingChip").classList.toggle("hidden", !n);
-    $("pendingChip").innerHTML = `<span class="lg">ждут одобрения: ${n}</span><span class="sm">⚠ ${n}</span>`;
-    $("pendingChip").title = "ждут одобрения человека: " + n + " (фильтр «ждут одобрения» в поиске)";
+    $("pendingChip").innerHTML = `<span class="lg">${ME.kind === "human" ? "ждут твоего решения" : "ждут одобрения"}: ${n}</span><span class="sm">⚠ ${n}</span>`;
+    $("pendingChip").title = (ME.kind === "human" ? "ждут твоего решения: " : "ждут одобрения человека: ") + n + " (фильтр «ждут одобрения» в поиске)";
     document.title = (n ? `(${n}) ` : "") + "telegent";
   } catch {}
 }

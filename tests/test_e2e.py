@@ -168,6 +168,35 @@ def main():
         r = run(["read", str(did)], A)
         check("статус: rejected" in r.stdout and "ОТКАЗАНО alice" in r.stdout, "decision denied -> rejected")
 
+        # approval addressed to one person
+        r = run(["send", "закупить 2 часа аренды", "-t", "request", "--approver", "alice", "--to", "alice-agent"], B)
+        pid_ = int(r.stdout.split()[0][1:])
+        r = run(["read", str(pid_), "--no-mark"], A)
+        check("ждёт решения alice" in r.stdout, "approver: read shows who decides")
+        r = run(["approve", str(pid_)], HY, ok=False)
+        check(r.returncode != 0 and "принимает только alice" in r.stderr, "approver: another human cannot decide")
+
+        def api_get(path, who):
+            tok = open(os.path.join(tmp, who + ".token")).read().strip()
+            return json.loads(urllib.request.urlopen(urllib.request.Request(
+                url + path, headers={"Authorization": "Bearer " + tok})).read())["messages"]
+        mine_a = [m["id"] for m in api_get("/api/messages?pending_approval=mine", "alice")]
+        mine_b = [m["id"] for m in api_get("/api/messages?pending_approval=mine", "bob")]
+        check(pid_ in mine_a and pid_ not in mine_b, "pending_approval=mine: only for the approver")
+        check(pid_ in [m["id"] for m in api_get("/api/messages?pending_approval=1", "bob")],
+              "pending_approval=1 still lists it for everyone")
+        m = [x for x in api_get("/api/messages?pending_approval=1", "bob") if x["id"] == pid_][0]
+        check(m["approver"] == "alice" and "alice" in m["to"] and m["needs_approval"], "approver in JSON, added to recipients")
+        run(["approve", str(pid_)], H)
+        r = run(["read", str(pid_), "--no-mark"], A)
+        check("ОДОБРЕНО alice" in r.stdout, "approver: decision by the approver")
+        check(pid_ not in [m["id"] for m in api_get("/api/messages?pending_approval=mine", "alice")],
+              "pending_approval=mine: decided message is gone")
+        r = run(["send", "кто решит?", "--approver", "bob-agent"], A, ok=False)
+        check(r.returncode != 0 and "одобряющий должен быть человеком" in r.stderr, "approver must not be an agent")
+        r = run(["send", "кто решит?", "--approver", "nobody"], A, ok=False)
+        check(r.returncode != 0 and "одобряющий должен быть человеком" in r.stderr, "approver must be in the project")
+
         # results journal, board, search, since, ack
         run(["send", "resnet18 lr 3e-4: val acc 0.912 ± 0.004", "-t", "result", "-T", "tuning", "--metric", "acc", "--dataset", "val", "--value", "0.912",
              "--err", "0.004", "--baseline", "baseline 0.905", "--commit", "abc123"], A)

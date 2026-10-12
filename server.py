@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS messages(
   priority TEXT NOT NULL DEFAULT 'normal', subject TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
   reply_to INTEGER, thread_id INTEGER, needs_approval INTEGER NOT NULL DEFAULT 0,
   status TEXT, status_by TEXT, status_ts REAL, status_ref TEXT, status_note TEXT,
-  result TEXT, idem_key TEXT,
+  result TEXT, idem_key TEXT, approver TEXT,
   UNIQUE(author, idem_key));
 CREATE INDEX IF NOT EXISTS ix_msg_thread ON messages(thread_id);
 CREATE TABLE IF NOT EXISTS approvals(
@@ -184,7 +184,8 @@ def db():
         for table, col, decl in (("receipts", "delivered_ts", "REAL"), ("users", "last_seen_ts", "REAL"),
                                  ("users", "last_wait_ts", "REAL"), ("users", "pw_hash", "TEXT"),
                                  ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
-                                 ("messages", "project_id", "INTEGER"), ("claims", "project_id", "INTEGER"),
+                                 ("messages", "project_id", "INTEGER"), ("messages", "approver", "TEXT"),
+                                 ("claims", "project_id", "INTEGER"),
                                  ("invites", "project_id", "INTEGER"), ("invites", "role", "TEXT")):
             if col not in {r[1] for r in _db.execute(f"PRAGMA table_info({table})")}:
                 _db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -588,7 +589,7 @@ def msg_dicts(rows, me=None, full=True):
             "priority": r["priority"], "subject": r["subject"],
             "body": r["body"] if full else r["body"][:400],
             "reply_to": r["reply_to"], "thread_id": r["thread_id"],
-            "needs_approval": bool(r["needs_approval"]),
+            "needs_approval": bool(r["needs_approval"]), "approver": r["approver"],
             "approvals": approvals.get(r["id"], []),
             "status": None if r["status"] is None else {
                 "state": r["status"], "by": r["status_by"], "time": iso(r["status_ts"]),
@@ -669,6 +670,15 @@ def insert_message(user, host, data, pid, system=False):
         result = result or None
 
     needs_approval = bool(data.get("needs_approval")) or mtype == "decision"
+    approver = str(data.get("approver") or "").strip() or None
+    if approver:
+        needs_approval = True
+        row = con.execute("SELECT u.kind FROM members m JOIN users u ON u.name = m.user "
+                          "WHERE m.project_id = ? AND m.user = ? AND u.revoked = 0", (pid, approver)).fetchone()
+        if not row or row["kind"] != "human":
+            raise ApiError(400, "одобряющий должен быть человеком из этого проекта")
+        if to and approver not in to and approver != user["name"]:
+            to.append(approver)   # the request must reach the person who decides
     status = "open" if mtype in TRACKED_TYPES else None
 
     # attachments: decode + validate before writing anything
@@ -712,12 +722,12 @@ def insert_message(user, host, data, pid, system=False):
         try:
             cur = con.execute(
                 "INSERT INTO messages(ts, author, author_kind, owner, host, recipients, topic, type, priority,"
-                " subject, body, reply_to, thread_id, needs_approval, status, result, idem_key, project_id)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " subject, body, reply_to, thread_id, needs_approval, status, result, idem_key, project_id, approver)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (time.time(), user["name"], user["kind"], user["owner"], (host or "")[:120],
                  ("," + ",".join(to) + ",") if to else "", topic, mtype, priority, subject, body,
                  reply_to, thread_id, int(needs_approval), status,
-                 json.dumps(result, ensure_ascii=False) if result else None, idem, pid))
+                 json.dumps(result, ensure_ascii=False) if result else None, idem, pid, approver))
             mid = cur.lastrowid
             if thread_id is None:
                 con.execute("UPDATE messages SET thread_id = ? WHERE id = ?", (mid, mid))
@@ -785,8 +795,11 @@ def list_messages(me, q, pid):
         args.append(me["name"])
     if q.get("open") == "1":
         where.append("m.status IN ('open','taken')")
-    if q.get("pending_approval") == "1":
+    if q.get("pending_approval") in ("1", "mine"):
         where.append("m.needs_approval = 1 AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.message_id = m.id)")
+        if q["pending_approval"] == "mine":
+            where.append("(m.approver = ? OR m.approver IS NULL)")
+            args.append(me["name"])
     if q.get("results") == "1":
         where.append("m.result IS NOT NULL")
     limit = max(1, min(int(q.get("limit") or 50), 1000))
@@ -847,6 +860,8 @@ def set_approval(me, host, mid, data):
     m = get_message_row(mid, me)
     if not m["needs_approval"]:
         raise ApiError(400, f"#{mid} не просит одобрения")
+    if m["approver"] and m["approver"] != me["name"]:
+        raise ApiError(403, f"решение по #{mid} принимает только {m['approver']}")
     now = time.time()
     with DB_LOCK:
         db().execute("INSERT OR REPLACE INTO approvals(message_id, user, decision, note, ts) VALUES (?,?,?,?,?)",

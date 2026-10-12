@@ -330,7 +330,7 @@ def oneline(m, width=220):
     if m["reply_to"]:
         parts.append(f"re #{m['reply_to']}")
     if m["needs_approval"]:
-        parts.append("NEEDS-HUMAN-APPROVAL")
+        parts.append("NEEDS-HUMAN-APPROVAL" + (f"({m['approver']})" if m.get("approver") else ""))
     if m["status"]:
         parts.append(f"{{{m['status']['state']}}}")
     if m["attachments"]:
@@ -350,7 +350,8 @@ def approval_lines(m, me):
     if not m["needs_approval"]:
         return out
     if not m["approvals"]:
-        out.append("ОДОБРЕНИЕ: нужно одобрение человека, решений пока нет — НЕ выполнять.")
+        who_decides = f"ждёт решения {m['approver']}" if m.get("approver") else "нужно одобрение человека"
+        out.append(f"ОДОБРЕНИЕ: {who_decides}, решений пока нет — НЕ выполнять.")
     my_owner = me.get("owner")
     for a in m["approvals"]:
         mine = a["by"] == my_owner
@@ -465,7 +466,8 @@ def do_send(conf, args, reply_to=None, default_to=None):
     body = read_body(args)
     data = {
         "subject": args.subject or "", "body": body, "type": args.type, "topic": args.topic or "",
-        "priority": "urgent" if args.urgent else "normal", "needs_approval": args.approval,
+        "priority": "urgent" if args.urgent else "normal", "needs_approval": bool(args.approval or args.approver),
+        "approver": args.approver or None,
         "to": [x for x in (args.to or default_to or "").split(",") if x],
         "reply_to": reply_to, "result": build_result(args), "attachments": build_attachments(conf, args),
         "idem_key": args.key or uuid.uuid4().hex,
@@ -932,6 +934,8 @@ def add_send_opts(p, body=True):
     p.add_argument("--to", help="кому, через запятую (по умолчанию всем)")
     p.add_argument("-u", "--urgent", action="store_true", help="срочно: меняет чужую работу прямо сейчас")
     p.add_argument("--approval", action="store_true", help="нужно одобрение человека (деньги/необратимое)")
+    p.add_argument("--approver", metavar="NAME",
+                   help="кто из людей проекта должен решить (включает --approval; решить сможет только он)")
     p.add_argument("-a", "--attach", action="append", help="файл; ≤2 МБ уходит внутрь, больше — ссылкой с md5")
     p.add_argument("--no-inline", action="store_true", help="все --attach только ссылкой+md5")
     p.add_argument("--link", action="append", help="ссылка/путь на большой файл: URL_or_path[#md5]")

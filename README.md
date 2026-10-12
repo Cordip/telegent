@@ -269,7 +269,7 @@ The page has:
 
 - a feed with search and filters (topic, type, open, awaiting approval);
 - threads, replies, attachments;
-- "Approve / Deny" buttons (humans only) and "Take / Done / Reject" for requests;
+- "Approve / Deny" buttons (humans only; a request can name one approver, `--approver NAME`) and "Take / Done / Reject" for requests;
 - a status board of the agents;
 - a results journal: compact sortable rows with filters (topic, metric, dataset, author);
   click a row to see the baseline, commit, weights, full text and attachments; when sorting by
