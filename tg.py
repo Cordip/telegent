@@ -314,6 +314,16 @@ def short_time(iso):
     return f"{iso[5:10]} {iso[11:16]}{iso[19:22]}"
 
 
+def span(sec):
+    """Seconds -> '5 мин' / '3 ч' / '2 дн'."""
+    sec = abs(sec)
+    if sec < 3600:
+        return f"{max(1, round(sec / 60))} мин"
+    if sec < 86400:
+        return f"{round(sec / 3600)} ч"
+    return f"{round(sec / 86400)} дн"
+
+
 def who(m):
     kind = "HUMAN" if m["author_kind"] == "human" else "agent"
     return f"{m['author']}({kind}@{m['host'] or '?'})"
@@ -491,7 +501,14 @@ def do_send(conf, args, reply_to=None, default_to=None):
         print(f"внимание: {w}")
     for u in res.get("not_listening") or []:
         since = f"с {short_time(u['last_listen'])}" if u.get("last_listen") else "ни разу не подключался"
-        print(f"внимание: {u['name']} сейчас не слушает (watch не активен, {since}) — увидит при следующем заходе. "
+        # the board entry (if fresh) says when they may be back; older than 48 h it tells nothing
+        fresh = u.get("board_age") is not None and u["board_age"] < 48 * 3600
+        hint = ""
+        if fresh and u.get("board_back"):
+            hint = f" По доске: вернётся {u['board_back']} (запись {span(u['board_age'])} назад)."
+        elif fresh and u.get("board_now"):
+            hint = f" По доске: {u['board_now'][:60]} (запись {span(u['board_age'])} назад)."
+        print(f"внимание: {u['name']} сейчас не слушает (watch не активен, {since}) — увидит при следующем заходе.{hint} "
               f"Если срочно, напиши его человеку. Статус: python tg.py sent")
 
 
@@ -508,6 +525,20 @@ def cmd_reply(conf, args):
     me = get_me(conf)
     default_to = parent["author"] if parent["author"] != me["name"] else ""
     do_send(conf, args, reply_to=args.id, default_to=default_to)
+
+
+def expired_mine(conf):
+    """Number of my claims past their expiry; never raises (it is only a reminder)."""
+    try:
+        rows = api_retry(conf, "GET", "/api/claims?" + urllib.parse.urlencode({"active": "1", "owner": get_me(conf)["name"]}))
+        return sum(1 for c in rows["claims"] if c.get("expired"))
+    except (Exception, SystemExit):
+        return 0
+
+
+def print_expired_hint(n):
+    if n:
+        print(f"у тебя просроченных заявок: {n} — продли (claim КЛЮЧ --hours N) или сними (release)")
 
 
 def cmd_inbox(conf, args):
@@ -529,6 +560,7 @@ def cmd_inbox(conf, args):
     msgs = res["messages"]
     if not msgs:
         print("пусто" + ("" if args.all or args.since is not None else " (всё подтверждено ack)"))
+        print_expired_hint(expired_mine(conf))
         return
     me = get_me(conf) if args.full else None
     for m in msgs:
@@ -538,6 +570,7 @@ def cmd_inbox(conf, args):
             flag = "" if m["read"] else "*"
             print(flag + oneline(m))
     print(f"-- {len(msgs)} сообщ.; последний #{msgs[-1]['id']}; * = не прочитано. read <id> — целиком, ack <id> — убрать из inbox")
+    print_expired_hint(expired_mine(conf))
 
 
 def cmd_read(conf, args):
@@ -653,9 +686,9 @@ def cmd_watch(conf, args):
 
 def cmd_board(conf, args):
     if args.action == "set":
-        data = {k: getattr(args, k) for k in ("now", "next", "gpu_until", "note") if getattr(args, k) is not None}
+        data = {k: getattr(args, k) for k in ("now", "next", "gpu_until", "note", "back") if getattr(args, k) is not None}
         if not data:
-            die("board set --now ... --next ... --gpu-until ... --note ...")
+            die("board set --now ... --next ... --gpu-until ... --note ... --back ...")
         for k, v in data.items():
             scan_local(conf, k, v)
         res = api_retry(conf, "POST", "/api/board", data)
@@ -664,8 +697,11 @@ def cmd_board(conf, args):
     if not res["board"]:
         print("доска пуста")
     for b in res["board"]:
-        print(f"{b['name']}  ({short_time(b['time'])})")
-        for k, label in (("now", "сейчас"), ("next", "дальше"), ("gpu_until", "карта занята до"), ("note", "заметка")):
+        age = b.get("age")
+        stale = " — давно не обновлялась" if age is not None and age > 24 * 3600 else ""
+        print(f"{b['name']}  ({short_time(b['time'])}" + (f", обновлено {span(age)} назад{stale}" if age is not None else "") + ")")
+        for k, label in (("now", "сейчас"), ("next", "дальше"), ("gpu_until", "карта занята до"), ("note", "заметка"),
+                         ("back", "вернётся")):
             if b.get(k):
                 print(f"  {label}: {b[k]}")
 
@@ -679,6 +715,8 @@ def claim_line(c):
         parts.append(f"до {c['until']}")
     if c.get("note"):
         parts.append(f"| {c['note']}")
+    if c.get("expires_in") is not None:
+        parts.append(f"| ПРОСРОЧЕНА {span(c['expires_in'])} назад" if c.get("expired") else f"| ещё {span(c['expires_in'])}")
     line = " ".join(parts)
     if c.get("released"):
         why = (f": {c['release_note']}" if c.get("release_note") else "") + (f" (результат #{c['release_msg']})" if c.get("release_msg") else "")
@@ -687,7 +725,8 @@ def claim_line(c):
 
 
 def cmd_claim(conf, args):
-    data = {"key": args.key, "topic": args.topic, "note": args.note, "until": args.until, "force": args.force}
+    data = {"key": args.key, "topic": args.topic, "note": args.note, "until": args.until, "force": args.force,
+            "hours": args.hours}
     for k in ("key", "topic", "note", "until"):
         scan_local(conf, k, data[k])
     try:
@@ -703,6 +742,8 @@ def cmd_claim(conf, args):
     extra = ", ".join(x for x in ((f"топик {c['topic']}" if c["topic"] else ""), (f"до {c['until']}" if c.get("until") else ""),
                                   (c.get("note") or "")) if x)
     print(f"занято: {c['key']} (#{c['id']}{', обновлено' if not res['created'] else ''}{', ' + extra if extra else ''})")
+    if res.get("expired_released"):
+        print(f"взято поверх просроченной заявки {res['expired_released']['owner']}")
     if res.get("taken_over"):
         print(f"перехвачено у {res['taken_over']['owner']}: напиши ему, что забрал заявку")
 
@@ -828,6 +869,9 @@ def cmd_hook(conf, args):
         since = f"с {short_time(res['last_listen'])}" if res.get("last_listen") else "ещё не запускался"
         out.append(f"{tag} твой watch НЕ слушает ({since}), новые сообщения сами не придут. "
                    f"Запусти на Monitor: {conf.watch_cmd or tg + ' watch'}")
+    mine = sum(1 for c in res.get("claims") or [] if c.get("owner") == res["name"] and c.get("expired"))
+    if mine:     # a count only, no claim text
+        out.append(f"{tag} у тебя просроченных заявок: {mine} — продли (claim КЛЮЧ --hours N) или сними (release).")
     n = res["unacked_total"]
     if n:
         ids = ", ".join(f"#{m['id']} {m['type']} от {m['author']}" + (" СРОЧНО" if m["priority"] == "urgent" else "")
@@ -1004,11 +1048,13 @@ def main():
     s.add_argument("--next")
     s.add_argument("--gpu-until", dest="gpu_until")
     s.add_argument("--note")
+    s.add_argument("--back", help="когда вернёшься, свободный текст ('~23:00'); пустая строка очищает")
     s = sub.add_parser("claim", help="занять эксперимент (чтобы второй агент не обучал то же самое)")
     s.add_argument("key", help="что занимаешь, например 'resnet18 lr3e-4 seed1' (регистр и пробелы не важны)")
     s.add_argument("-T", "--topic")
     s.add_argument("--note")
     s.add_argument("--until", help="до когда, свободный текст: '03:00'")
+    s.add_argument("--hours", type=float, help="срок заявки в часах (по умолчанию 24); повторный claim продлевает")
     s.add_argument("--force", action="store_true", help="перехватить чужую заявку (только по договорённости)")
     s = sub.add_parser("claims", help="кто что занял (по умолчанию активные)")
     s.add_argument("--all", action="store_true", help="и снятые тоже")

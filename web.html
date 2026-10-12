@@ -77,6 +77,7 @@ header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
 aside .panel { margin-bottom: 14px; }
 aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 8px; }
 .board-item { border-top: 1px solid var(--line); padding: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
+.stale { color: var(--warn); font-size: 12px; }
 .board-item:first-of-type { border-top: 0; }
 .err { color: var(--urgent); font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
 .err:empty { display: none; }
@@ -1487,12 +1488,20 @@ async function joinFlow(code) {
   };
 }
 
+function spanRu(sec) {
+  sec = Math.abs(sec);
+  if (sec < 3600) return Math.max(1, Math.round(sec / 60)) + " мин";
+  if (sec < 86400) return Math.round(sec / 3600) + " ч";
+  return Math.round(sec / 86400) + " дн";
+}
+
 async function loadBoard() {
   loadPresence();
   try {
     const res = await api("GET", "/api/board");
     $("board").classList.toggle("muted", !res.board.length);
-    $("board").innerHTML = res.board.length ? res.board.map(b => `<div class="board-item"><b>${esc(b.name)}</b> <span class="muted">${shortTime(b.time)}</span>
+    $("board").innerHTML = res.board.length ? res.board.map(b => `<div class="board-item"><b>${esc(b.name)}</b> <span class="muted">${shortTime(b.time)}${b.age != null ? ", обновлено " + spanRu(b.age) + " назад" : ""}</span>${b.age > 86400 ? ` <span class="stale">давно не обновлялась</span>` : ""}
+      ${b.back ? `<div>вернётся: ${esc(b.back)}</div>` : ""}
       ${b.now ? `<div>сейчас: ${esc(b.now)}</div>` : ""}${b.next ? `<div>дальше: ${esc(b.next)}</div>` : ""}
       ${b.gpu_until ? `<div>карта занята до: ${esc(b.gpu_until)}</div>` : ""}${b.note ? `<div class="muted">${esc(b.note)}</div>` : ""}</div>`).join("")
       : "Пока никто не заполнил (агенты: <code>tg.py board set</code>).";
@@ -1589,7 +1598,7 @@ async function loadClaims() {
   const [act, rel] = await Promise.all([api("GET", "/api/claims?active=1"), api("GET", "/api/claims?active=0&limit=20")]);
   const human = ME.kind === "human";
   $("claimsTable").innerHTML = `<tr><th>эксперимент</th><th>кто</th><th>топик</th><th>с</th><th>до</th><th>заметка</th><th></th></tr>` +
-    (act.claims.length ? act.claims.map(c => `<tr><td><b>${esc(c.key)}</b></td><td>${esc(c.owner)}</td><td>${esc(c.topic)}</td>
+    (act.claims.length ? act.claims.map(c => `<tr><td><b>${esc(c.key)}</b>${c.expired ? ` <span class="muted">просрочена ${spanRu(c.expires_in)} назад</span>` : (c.expires_in != null ? ` <span class="muted">ещё ${spanRu(c.expires_in)}</span>` : "")}</td><td>${esc(c.owner)}</td><td>${esc(c.topic)}</td>
       <td>${shortTime(c.created)}</td><td>${esc(c.until)}</td><td>${esc(c.note)}</td>
       <td>${human ? `<button class="bad" data-act="unclaim" data-id="${c.id}">Снять</button>` : ""}</td></tr>`).join("")
       : `<tr><td colspan="7" class="muted">Ничего не занято (агенты: <code>tg.py claim "ключ"</code> перед запуском на GPU).</td></tr>`);

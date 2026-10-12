@@ -186,6 +186,7 @@ def db():
                                  ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
                                  ("messages", "project_id", "INTEGER"), ("messages", "approver", "TEXT"),
                                  ("claims", "project_id", "INTEGER"),
+                                 ("claims", "expires", "REAL"),
                                  ("invites", "project_id", "INTEGER"), ("invites", "role", "TEXT")):
             if col not in {r[1] for r in _db.execute(f"PRAGMA table_info({table})")}:
                 _db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -199,6 +200,8 @@ def db():
                 INSERT INTO board(project_id, name, now, next, gpu_until, note, ts)
                   SELECT 0, name, now, next, gpu_until, note, ts FROM board_old;
                 DROP TABLE board_old;""")
+        if "back" not in {r[1] for r in _db.execute("PRAGMA table_info(board)")}:
+            _db.execute("ALTER TABLE board ADD COLUMN back TEXT")
         _db.create_function("pylower", 1, lambda s: s.lower() if isinstance(s, str) else s)
         ensure_default_project(_db)
         # messages used to have a separate subject; now it is the first line of the text (idempotent)
@@ -880,8 +883,14 @@ def norm_key(s):
     return " ".join(str(s or "").lower().split())
 
 
+CLAIM_HOURS = 24      # default lifetime of a claim: a forgotten one must not block others forever
+
+
 def claim_dict(r):
-    return {"id": r["id"], "key": r["display_key"], "norm_key": r["key"], "topic": r["topic"], "owner": r["owner"],
+    exp = r["expires"]        # NULL = old claim, never expires
+    left = round(exp - time.time()) if exp is not None and r["released"] is None else None
+    return {"expires": iso(exp), "expires_in": left, "expired": left is not None and left < 0,
+            "id": r["id"], "key": r["display_key"], "norm_key": r["key"], "topic": r["topic"], "owner": r["owner"],
             "owner_kind": r["owner_kind"], "host": r["host"], "note": r["note"], "until": r["until"],
             "created": iso(r["created"]), "released": iso(r["released"]), "active": r["released"] is None,
             "release_note": r["release_note"], "release_msg": r["release_msg"]}
@@ -1445,7 +1454,7 @@ def api_summary(h, user, q, data):
         shown = unacked[-max(1, min(int(q.get("limit") or 10), 50)):]
         if shown:
             mark(user, [m["id"] for m in shown], "delivered")
-        claims = [{k: c[k] for k in ("id", "key", "owner", "topic", "until", "created")}
+        claims = [{k: c[k] for k in ("id", "key", "owner", "topic", "until", "created", "expired", "expires_in")}
                   for c in list_claims({"active": "1"}, p["id"])]
     return {"name": user["name"], "listening": me["listening"], "last_listen": me["last_listen"],
             "unacked_total": len(unacked), "unacked": shown, "last_id": LAST_ID[0], "claims": claims}
@@ -1482,6 +1491,10 @@ def api_send(h, user, q, data):
         expected = set(expected_recipients(p["id"], user["name"], recipients_list(m["recipients"])))
         offline = [dict(name=u["name"], last_listen=u["last_listen"]) for u in users_with_presence(p["id"])
                    if u["name"] in expected and not u["listening"]]
+        for o in offline:     # the recipient's board entry tells when they may be back
+            b = db().execute("SELECT * FROM board WHERE project_id = ? AND name = ?", (p["id"], o["name"])).fetchone()
+            if b and b["ts"]:
+                o.update(board_now=b["now"], board_back=b["back"], board_age=round(time.time() - b["ts"]))
     res = {"id": mid, "duplicate": dup, "not_listening": offline}
     if warnings:
         res["warnings"] = warnings
@@ -1578,14 +1591,15 @@ def api_board(h, user, q, data):
     with DB_LOCK:
         rows = db().execute("SELECT * FROM board WHERE project_id = ? ORDER BY name", (p["id"],)).fetchall()
     return {"board": [{"name": r["name"], "now": r["now"], "next": r["next"], "gpu_until": r["gpu_until"],
-                       "note": r["note"], "time": iso(r["ts"])} for r in rows]}
+                       "note": r["note"], "back": r["back"], "time": iso(r["ts"]),
+                       "age": round(time.time() - r["ts"]) if r["ts"] else None} for r in rows]}
 
 
 @route("POST", "/api/board")
 def api_board_set(h, user, q, data):
     p = project_for(h, user, q)
     vals = {}
-    for k in ("now", "next", "gpu_until", "note"):
+    for k in ("now", "next", "gpu_until", "note", "back"):
         v = data.get(k)
         if v is not None:
             v = str(v)[:500]
@@ -1617,27 +1631,42 @@ def api_claim(h, user, q, data):
     p = project_for(h, user, q)
     vals = {"topic": claim_text(data, "topic", 60), "note": claim_text(data, "note", 500),
             "until": claim_text(data, "until", 100)}
+    try:
+        hours = float(data["hours"]) if data.get("hours") is not None else CLAIM_HOURS
+    except (TypeError, ValueError):
+        raise ApiError(400, "hours должно быть числом (часы, можно дробное)")
+    if not 0 < hours <= 24 * 365:
+        raise ApiError(400, "hours должно быть больше 0 и не больше года")
+    expires = time.time() + hours * 3600
     with DB_LOCK:
         con = db()
         cur = con.execute("SELECT * FROM claims WHERE key = ? AND released IS NULL AND project_id = ? ORDER BY id DESC",
                           (key, p["id"])).fetchone()
         taken = None
-        if cur and cur["owner"] == user["name"]:      # same owner again: idempotent, only refresh what was passed
+        if cur and cur["owner"] == user["name"]:      # same owner again: idempotent, extend the lifetime, refresh what was passed
+            con.execute("UPDATE claims SET expires = ? WHERE id = ?", (expires, cur["id"]))
             for k, v in vals.items():
                 if data.get(k) is not None:
                     con.execute(f"UPDATE claims SET {k} = ? WHERE id = ?", (v if k == "topic" else (v or None), cur["id"]))
             row = con.execute("SELECT * FROM claims WHERE id = ?", (cur["id"],)).fetchone()
             return {"claim": claim_dict(row), "created": False}
+        if cur and cur["expires"] is not None and cur["expires"] < time.time():
+            taken = release_claim(cur, "истекла")      # a lapsed claim is free for anyone, no --force needed
+            res_expired, cur = taken, None
+        else:
+            res_expired = None
         if cur:
             if not data.get("force"):
                 raise ApiError(409, f"«{cur['display_key']}» уже занято: {cur['owner']}", holder=claim_dict(cur))
             taken = release_claim(cur, f"перехвачено {user['name']}")
         cid = con.execute("INSERT INTO claims(key, display_key, topic, owner, owner_kind, host, note, until, created,"
-                          " project_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                          " project_id, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                           (key, display, vals["topic"], user["name"], user["kind"], h.host(), vals["note"] or None,
-                           vals["until"] or None, time.time(), p["id"])).lastrowid
+                           vals["until"] or None, time.time(), p["id"], expires)).lastrowid
         res = {"claim": claim_dict(con.execute("SELECT * FROM claims WHERE id = ?", (cid,)).fetchone()), "created": True}
-        if taken:
+        if res_expired:
+            res["expired_released"] = res_expired
+        elif taken:
             res["taken_over"] = taken
         return res
 

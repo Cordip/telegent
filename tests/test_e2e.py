@@ -60,7 +60,7 @@ def main():
     A, B, H, HY = cfgs["alice-agent"], cfgs["bob-agent"], cfgs["alice"], cfgs["bob"]
 
     srv = subprocess.Popen([PY, os.path.join(ROOT, "server.py"), "--db", db, "serve", "--port", str(port)],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV)
     watcher = None
     try:
         for _ in range(50):
@@ -277,6 +277,63 @@ def main():
             url + "/api/summary", headers={"Authorization": "Bearer " + open(os.path.join(tmp, "alice-agent.token")).read().strip()})).read())
         check([c["key"] for c in sm["claims"]] == ["X3"], "summary carries active claims")
 
+        # claim lifetime: expiry, takeover of an expired claim, extension, reminders
+        r = run(["claim", "exp42 short", "--hours", "0.0003"], A)
+        r = run(["claim", "exp42 live"], A)
+        r = run(["claims"], B)
+        check("ещё " in r.stdout and "ПРОСРОЧЕНА" not in r.stdout, "claims: live claim shows remaining time")
+        time.sleep(1.6)
+        r = run(["claims"], B)
+        check("exp42 short" in r.stdout and "ПРОСРОЧЕНА" in r.stdout and "назад" in r.stdout,
+              "expired claim is still listed, marked as expired")
+        r = run(["hook"], A)
+        check("просроченных заявок: 1" in r.stdout and "exp42" not in r.stdout, "hook: count of expired claims, no claim text")
+        r = run(["inbox", "--all", "--limit", "1"], A)
+        check("просроченных заявок: 1" in r.stdout, "inbox footer: expired claims reminder")
+        r = run(["claim", "exp42 live"], B, ok=False)
+        check(r.returncode == 2 and "alice-agent" in r.stderr, "live foreign claim still conflicts")
+        r = run(["claim", "exp42 short", "--hours", "2"], A)
+        check("обновлено" in r.stdout, "same holder re-claim extends")
+        r = run(["claims"], B)
+        check("ПРОСРОЧЕНА" not in r.stdout and len([ln for ln in r.stdout.splitlines() if "exp42 short" in ln]) == 1,
+              "extended claim is live again, no duplicate")
+        r = run(["hook"], A)
+        check("просроченных" not in r.stdout, "hook: no reminder after extending")
+        run(["claim", "exp42 gone", "--hours", "0.0003"], A)
+        time.sleep(1.6)
+        r = run(["claim", "exp42 gone"], B)
+        check("занято: exp42 gone" in r.stdout and "просроченной заявки alice-agent" in r.stdout,
+              "another agent takes over an expired claim without --force")
+        r = run(["claims", "--all"], B)
+        check("истекла" in r.stdout, "expired claim released with the note")
+        # an old claim without expiry (pre-migration row) never expires
+        import sqlite3
+        con = sqlite3.connect(db)
+        con.execute("UPDATE claims SET expires = NULL WHERE key = 'exp42 live'")
+        con.commit()
+        con.close()
+        r = run(["claims"], B)
+        check("exp42 live" in r.stdout and "ПРОСРОЧЕНА" not in r.stdout, "claim without expiry still works")
+        r = run(["claim", "exp42 live"], B, ok=False)
+        check(r.returncode == 2, "claim without expiry still conflicts")
+
+        # board: age, back-at hint for senders
+        r = run(["board", "set", "--back", "~23:00"], A)
+        check("вернётся: ~23:00" in r.stdout and "обновлено" in r.stdout and "давно" not in r.stdout, "board shows back and age")
+        r = run(["send", "ты тут?", "--to", "alice-agent"], B)
+        check("По доске: вернётся ~23:00 (запись " in r.stdout, "not-listening warning carries the board back-at")
+        run(["board", "set", "--back", ""], A)
+        r = run(["send", "ты тут?", "--to", "alice-agent"], B)
+        check("По доске: tuning 16k (запись " in r.stdout, "warning falls back to the board 'now' text")
+        con = sqlite3.connect(db)
+        con.execute("UPDATE board SET ts = ts - 60 * 3600 WHERE name = 'alice-agent'")
+        con.commit()
+        con.close()
+        r = run(["send", "ты тут?", "--to", "alice-agent"], B)
+        check("не слушает" in r.stdout and "По доске" not in r.stdout, "stale board entry (>48 h) adds nothing")
+        r = run(["board"], B)
+        check("давно не обновлялась" in r.stdout, "board marks entries older than 24 h")
+
         # watch_cmd in config: the hook suggests it literally instead of the auto-built command
         r = run(["hook"], A)
         check("Запусти на Monitor: python " in r.stdout and "tg.py watch" in r.stdout, "hook default watch command")
@@ -297,7 +354,7 @@ def main():
         srv.wait()
         time.sleep(2.5)
         srv = subprocess.Popen([PY, os.path.join(ROOT, "server.py"), "--db", db, "serve", "--port", str(port)],
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=ENV)
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=ENV)
         time.sleep(1.0)
         run(["send", "после рестарта", "-t", "alert", "-T", "server"], A)
         t0 = time.time()
@@ -507,7 +564,6 @@ def main():
         # a message stored the old way (separate subject) is merged when the server starts
         srv.kill()
         srv.wait()
-        import sqlite3
         con = sqlite3.connect(db)
         pid = con.execute("SELECT id FROM projects WHERE slug = 'main'").fetchone()[0]
         old = con.execute("INSERT INTO messages(ts, author, author_kind, owner, host, recipients, topic, type, priority,"
