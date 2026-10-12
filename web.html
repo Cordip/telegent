@@ -450,6 +450,7 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
     <span class="dot" id="conn" title="связь"></span>
     <span class="muted" id="meLabel"></span>
     <span style="flex:1"></span>
+    <span class="chip need hidden" id="waitChip" style="cursor:pointer" title="вопросы и просьбы лично тебе, на которые нет ответа: показать"></span>
     <span class="chip need hidden" id="pendingChip"></span>
     <button id="projBtn" title="проекты">Проекты</button>
     <button id="sideBtn" title="участники и доска статуса">Статус</button>
@@ -477,6 +478,7 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
           <select id="fType"><option value="">все типы</option></select>
           <label><input type="checkbox" id="fOpen"> открытые</label>
           <label><input type="checkbox" id="fPending"> ждут одобрения</label>
+          <label><input type="checkbox" id="fWaiting"> ждут моего ответа</label>
           <label><input type="checkbox" id="fSystem" checked> статусы</label>
         </div>
         <div id="threadBar" class="panel hidden" style="margin-bottom:10px"></div>
@@ -807,6 +809,7 @@ function filterQuery() {
   else if (!$("fSystem").checked) q.set("type", "info,request,question,result,alert,decision");
   if ($("fOpen").checked) q.set("open", "1");
   if ($("fPending").checked) q.set("pending_approval", "1");
+  if ($("fWaiting").checked) q.set("waiting_me", "1");
   if (THREAD) q.set("thread", THREAD);
   return q;
 }
@@ -872,15 +875,19 @@ new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) loadOlder()
 
 let searchTimer = null;
 $("q").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(reload, 300); };
-for (const id of ["fTopic", "fType", "fOpen", "fPending", "fSystem"]) $(id).onchange = reload;
+for (const id of ["fTopic", "fType", "fOpen", "fPending", "fWaiting", "fSystem"]) $(id).onchange = reload;
+$("waitChip").onclick = () => {
+  $("fWaiting").checked = true; $("fType").value = "";
+  $("filters").classList.add("open"); updateFilterCount(); reload();
+};
 $("filtersBtn").onclick = () => { $("filters").classList.toggle("open"); if ($("filters").classList.contains("open")) $("q").focus(); };
 function updateFilterCount() {
-  const n = [$("q").value.trim(), $("fTopic").value, $("fType").value, $("fOpen").checked, $("fPending").checked, !$("fSystem").checked]
+  const n = [$("q").value.trim(), $("fTopic").value, $("fType").value, $("fOpen").checked, $("fPending").checked, $("fWaiting").checked, !$("fSystem").checked]
     .filter(Boolean).length;
   $("filtersBtn").innerHTML = `<span class="sm">🔍</span><span class="lg">Поиск и фильтры</span>` + (n ? `<span class="fcount">${n}</span>` : "");
 }
-for (const id of ["q", "fTopic", "fType", "fOpen", "fPending", "fSystem"]) $(id).addEventListener("input", updateFilterCount);
-for (const id of ["fTopic", "fType", "fOpen", "fPending", "fSystem"]) $(id).addEventListener("change", updateFilterCount);
+for (const id of ["q", "fTopic", "fType", "fOpen", "fPending", "fWaiting", "fSystem"]) $(id).addEventListener("input", updateFilterCount);
+for (const id of ["fTopic", "fType", "fOpen", "fPending", "fWaiting", "fSystem"]) $(id).addEventListener("change", updateFilterCount);
 
 // returns false when nothing changed (the poll refreshes every ~25 s; don't repaint for nothing)
 function render(force) {
@@ -1521,6 +1528,11 @@ async function refreshSide() {
     $("pendingChip").innerHTML = `<span class="lg">${ME.kind === "human" ? "ждут твоего решения" : "ждут одобрения"}: ${n}</span><span class="sm">⚠ ${n}</span>`;
     $("pendingChip").title = (ME.kind === "human" ? "ждут твоего решения: " : "ждут одобрения человека: ") + n + " (фильтр «ждут одобрения» в поиске)";
     document.title = (n ? `(${n}) ` : "") + "telegent";
+    if (ME.kind === "human") {
+      const w = (await api("GET", "/api/messages?waiting_me=1&limit=100&full=0")).messages.length;
+      $("waitChip").classList.toggle("hidden", !w);
+      $("waitChip").innerHTML = `<span class="lg">ждут твоего ответа: ${w}</span><span class="sm">? ${w}</span>`;
+    }
   } catch {}
 }
 

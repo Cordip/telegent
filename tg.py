@@ -541,6 +541,31 @@ def print_expired_hint(n):
         print(f"у тебя просроченных заявок: {n} — продли (claim КЛЮЧ --hours N) или сними (release)")
 
 
+def waiting_lines(res):
+    """Reminder lines from /api/summary: ids, types, authors, counts, ages only (never message text)."""
+    out = []
+    w = res.get("waiting_me") or {}
+    if w.get("count"):
+        items = ", ".join(f"#{i['id']} {i['type']} от {i['author']}" for i in w["items"])
+        more = f" и ещё {w['count'] - len(w['items'])}" if w["count"] > len(w["items"]) else ""
+        out.append(f"вопросов и просьб, ждущих твоего ответа: {w['count']} ({items}{more}), старшему {span(w['oldest_age'])}. "
+                   "Ответь (reply) или возьми / отклони (take / reject).")
+    t = res.get("taken_open") or {}
+    if t.get("count"):
+        ids = ", ".join(f"#{i}" for i in t["ids"])
+        more = f" и ещё {t['count'] - len(t['ids'])}" if t["count"] > len(t["ids"]) else ""
+        out.append(f"взято тобой и не закрыто: {t['count']} ({ids}{more}), старшему {span(t['oldest_age'])}.")
+    return out
+
+
+def print_waiting(conf):
+    try:
+        for line in waiting_lines(api_retry(conf, "GET", "/api/summary?limit=1")):
+            print(line)
+    except (Exception, SystemExit):
+        pass
+
+
 def cmd_inbox(conf, args):
     q = {"limit": str(args.limit)}
     if args.since is not None:
@@ -561,6 +586,7 @@ def cmd_inbox(conf, args):
     if not msgs:
         print("пусто" + ("" if args.all or args.since is not None else " (всё подтверждено ack)"))
         print_expired_hint(expired_mine(conf))
+        print_waiting(conf)
         return
     me = get_me(conf) if args.full else None
     for m in msgs:
@@ -571,6 +597,7 @@ def cmd_inbox(conf, args):
             print(flag + oneline(m))
     print(f"-- {len(msgs)} сообщ.; последний #{msgs[-1]['id']}; * = не прочитано. read <id> — целиком, ack <id> — убрать из inbox")
     print_expired_hint(expired_mine(conf))
+    print_waiting(conf)
 
 
 def cmd_read(conf, args):
@@ -872,6 +899,7 @@ def cmd_hook(conf, args):
     mine = sum(1 for c in res.get("claims") or [] if c.get("owner") == res["name"] and c.get("expired"))
     if mine:     # a count only, no claim text
         out.append(f"{tag} у тебя просроченных заявок: {mine} — продли (claim КЛЮЧ --hours N) или сними (release).")
+    out += [f"{tag} {line}" for line in waiting_lines(res)]
     n = res["unacked_total"]
     if n:
         ids = ", ".join(f"#{m['id']} {m['type']} от {m['author']}" + (" СРОЧНО" if m["priority"] == "urgent" else "")

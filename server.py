@@ -757,6 +757,26 @@ def get_message_row(mid, user=None):
     return r
 
 
+# Placeholders: me (author), "%,me,%" (explicit recipient only: broadcasts do not nag), me (reply author).
+# An ack is a receipt, not a message, so it never answers a question; a later message of mine in the thread does.
+WAITING_SQL = ("(m.author != ? AND m.recipients LIKE ? AND ((m.type = 'request' AND m.status = 'open') OR"
+               " (m.type = 'question' AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.thread_id = m.thread_id"
+               " AND r.id > m.id AND r.author = ? AND r.type NOT IN ('status','approval')))))")
+
+
+def waiting_summary(me, pid):
+    """Counts and ages of what waits for me and of requests I took and did not close (for the hook and inbox)."""
+    con, now = db(), time.time()
+    rows = con.execute(f"SELECT m.id, m.type, m.author, m.ts FROM messages m WHERE m.project_id = ? AND {WAITING_SQL}"
+                       " ORDER BY m.id", (pid, me, f"%,{me},%", me)).fetchall()
+    taken = con.execute("SELECT id, ts FROM messages WHERE project_id = ? AND type = 'request' AND status = 'taken'"
+                        " AND status_by = ? ORDER BY id", (pid, me)).fetchall()
+    return {"waiting_me": {"count": len(rows), "oldest_age": round(now - rows[0]["ts"]) if rows else None,
+                           "items": [{"id": r["id"], "type": r["type"], "author": r["author"]} for r in rows[:10]]},
+            "taken_open": {"count": len(taken), "oldest_age": round(now - taken[0]["ts"]) if taken else None,
+                           "ids": [r["id"] for r in taken[:10]]}}
+
+
 def list_messages(me, q, pid):
     where, args = ["m.project_id = ?"], [pid]
     con = db()
@@ -788,6 +808,9 @@ def list_messages(me, q, pid):
     if q.get("for_me") == "1":
         where.append("m.author != ? AND (m.recipients = '' OR m.recipients LIKE ?)")
         args += [me["name"], f"%,{me['name']},%"]
+    if q.get("waiting_me") == "1":
+        where.append(WAITING_SQL)
+        args += [me["name"], f"%,{me['name']},%", me["name"]]
     if q.get("unacked") == "1":
         where.append("NOT EXISTS (SELECT 1 FROM receipts r WHERE r.user = ? AND r.message_id = m.id"
                      " AND r.ack_ts IS NOT NULL)")
@@ -1456,8 +1479,9 @@ def api_summary(h, user, q, data):
             mark(user, [m["id"] for m in shown], "delivered")
         claims = [{k: c[k] for k in ("id", "key", "owner", "topic", "until", "created", "expired", "expires_in")}
                   for c in list_claims({"active": "1"}, p["id"])]
+        wait = waiting_summary(user["name"], p["id"])
     return {"name": user["name"], "listening": me["listening"], "last_listen": me["last_listen"],
-            "unacked_total": len(unacked), "unacked": shown, "last_id": LAST_ID[0], "claims": claims}
+            "unacked_total": len(unacked), "unacked": shown, "last_id": LAST_ID[0], "claims": claims, **wait}
 
 
 @route("GET", "/api/messages")

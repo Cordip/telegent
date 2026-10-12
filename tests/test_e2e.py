@@ -334,6 +334,42 @@ def main():
         r = run(["board"], B)
         check("давно не обновлялась" in r.stdout, "board marks entries older than 24 h")
 
+        # reminder about what waits for me: explicit questions/requests, unanswered or not yet taken
+        def waiting_n(out):
+            m_ = re.search(r"ждущих твоего ответа: (\d+)", out)
+            return int(m_.group(1)) if m_ else 0
+        base = waiting_n(run(["hook"], B).stdout)
+        r = run(["send", "Вопрос-zq про веса", "-t", "question", "--to", "bob-agent"], A)
+        qid = int(re.match(r"#(\d+)", r.stdout).group(1))
+        r = run(["send", "Вопрос-zq всем", "-t", "question"], A)       # to everyone: not counted
+        run(["send", "Просьба-zq всем", "-t", "request"], A)
+        r = run(["hook"], B)
+        check(waiting_n(r.stdout) == base + 1 and f"#{qid} question от alice-agent" in r.stdout
+              and "zq" not in r.stdout and "[telegent:" in r.stdout, "hook: waiting question counted with id/type/author, no text")
+        r = run(["inbox"], B)
+        check(waiting_n(r.stdout) == base + 1 and f"#{qid} question от alice-agent" in r.stdout and "zq" not in r.stdout.split("-- ")[-1],
+              "inbox footer: waiting item")
+        r = run(["inbox", "--all", "--limit", "1", "--type", "info"], B)
+        check(waiting_n(r.stdout) == base + 1, "inbox footer also under a filter")
+        wl = [m["id"] for m in api_get("/api/messages?waiting_me=1&limit=100", "bob-agent")]
+        check(qid in wl and len(wl) == base + 1, "waiting_me=1 list filter returns exactly the waiting messages")
+        run(["ack", str(qid)], B)
+        check(waiting_n(run(["hook"], B).stdout) == base + 1, "ack alone does not answer a question")
+        run(["reply", str(qid), "ответ"], B)
+        check(waiting_n(run(["hook"], B).stdout) == base, "reply in the thread removes the question from the waiting list")
+        check(qid not in [m["id"] for m in api_get("/api/messages?waiting_me=1&limit=100", "bob-agent")],
+              "waiting_me=1 list drops the answered question")
+        r = run(["send", "Просьба-zq лично", "-t", "request", "--to", "bob-agent"], A)
+        rid = int(re.match(r"#(\d+)", r.stdout).group(1))
+        check(waiting_n(run(["hook"], B).stdout) == base + 1, "open request addressed to me counts")
+        run(["take", str(rid)], B)
+        r = run(["hook"], B)
+        check(waiting_n(r.stdout) == base and re.search(rf"взято тобой и не закрыто: 1 \(#{rid}\)", r.stdout),
+              "taken request moves to 'taken and not closed'")
+        check(re.search(rf"взято тобой и не закрыто: 1 \(#{rid}\)", run(["inbox"], B).stdout), "inbox footer: taken and not closed")
+        run(["done", str(rid)], B)
+        check("взято тобой" not in run(["hook"], B).stdout, "done request leaves 'taken and not closed'")
+
         # watch_cmd in config: the hook suggests it literally instead of the auto-built command
         r = run(["hook"], A)
         check("Запусти на Monitor: python " in r.stdout and "tg.py watch" in r.stdout, "hook default watch command")
