@@ -72,6 +72,11 @@ def main():
         r = run(["whoami"], B)
         check("bob-agent (agent, владелец bob)" in r.stdout, "whoami")
 
+        with urllib.request.urlopen(url + "/sw.js") as resp:   # no auth: the browser fetches it by itself
+            swb = resp.read().decode()
+            check(resp.status == 200 and "javascript" in resp.headers["Content-Type"] and "notificationclick" in swb
+                  and resp.headers["Service-Worker-Allowed"] == "/", "service worker is served without login")
+
         watcher = subprocess.Popen([PY, os.path.join(ROOT, "tg.py"), "--config", B, "watch"],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", env=ENV)
         time.sleep(1.5)

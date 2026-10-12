@@ -58,6 +58,7 @@ header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
 .msg.highlight { outline: 2px solid var(--accent); }
 .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); }
 .chip { background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--ink); white-space: nowrap; }
+#bellBtn.off { opacity: .55; }
 .chip.urgent { background: var(--urgent-bg); color: var(--urgent); font-weight: 600; }
 .chip.human { background: var(--human-bg); color: var(--human); font-weight: 600; }
 .chip.need { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
@@ -454,6 +455,7 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
     <span class="chip need hidden" id="pendingChip"></span>
     <button id="projBtn" title="проекты">Проекты</button>
     <button id="sideBtn" title="участники и доска статуса">Статус</button>
+    <button id="bellBtn" class="hidden"></button><a id="ntfJump" data-act="jump" hidden></a>
     <button id="themeBtn" title="тема">◐</button>
     <button id="pwBtn" class="hidden" title="задать или сменить пароль для входа">Пароль</button>
     <button id="logoutBtn">Выйти</button>
@@ -660,6 +662,7 @@ async function login(tok) {
   $("login").classList.add("hidden"); $("app").classList.remove("hidden");
   $("meLabel").textContent = `${ME.name} (${ME.kind === "human" ? "человек" : "агент"})`;
   $("pwBtn").classList.toggle("hidden", ME.kind !== "human");
+  ntfInit();
   $("pwBtn").textContent = ME.has_password ? "Пароль" : "Задать пароль";
   $("acctPw").textContent = $("pwBtn").textContent;
   $("acctPw").classList.toggle("hidden", ME.kind !== "human");
@@ -690,7 +693,7 @@ function showNoProject() {
 async function setProject(slug) {
   PROJECT = slug; st.set("tg_project", slug);
   if (POLL_ABORT) POLL_ABORT.abort();   // the running long-poll belongs to the previous project
-  MSGS = new Map(); LAST = 0; OLDEST = null; SIG = ""; UNSEEN = 0; THREAD = null;
+  MSGS = new Map(); LAST = 0; OLDEST = null; SIG = ""; UNSEEN = 0; THREAD = null; NTF.seen = 0;
   UNREAD_FROM = seen(slug);
   try { ME = await api("GET", "/api/me"); }
   catch (e) { if (/проекта/.test(e.message)) { PROJECT = null; return login(TOKEN); } throw e; }
@@ -835,6 +838,7 @@ async function reload() {
   OLDEST = res.messages.length ? res.messages[0].id : null;
   NO_MORE = res.messages.length < PAGE;
   LAST = Math.max(LAST, res.last_id);
+  NTF.seen = Math.max(NTF.seen, res.last_id);   // what is on the page now is not news
   online(); render(true); toBottom(); refreshSide();
 }
 
@@ -849,6 +853,7 @@ async function refresh() {
   MSGS = new Map(res.messages.map(m => [m.id, m]));
   if (!OLDEST && res.messages.length) OLDEST = res.messages[0].id;
   LAST = Math.max(LAST, res.last_id);
+  ntfNew(res.messages.filter(m => m.id > NTF.seen)); NTF.seen = Math.max(NTF.seen, res.last_id);
   online();
   if (!render()) return;
   if (stick) toBottom(); else if (fresh) { UNSEEN += fresh; updateNewBtn(); }
@@ -1527,7 +1532,7 @@ async function refreshSide() {
     $("pendingChip").classList.toggle("hidden", !n);
     $("pendingChip").innerHTML = `<span class="lg">${ME.kind === "human" ? "ждут твоего решения" : "ждут одобрения"}: ${n}</span><span class="sm">⚠ ${n}</span>`;
     $("pendingChip").title = (ME.kind === "human" ? "ждут твоего решения: " : "ждут одобрения человека: ") + n + " (фильтр «ждут одобрения» в поиске)";
-    document.title = (n ? `(${n}) ` : "") + "telegent";
+    NTF.pending = n; ntfTitle();
     if (ME.kind === "human") {
       const w = (await api("GET", "/api/messages?waiting_me=1&limit=100&full=0")).messages.length;
       $("waitChip").classList.toggle("hidden", !w);
@@ -1619,6 +1624,86 @@ async function loadClaims() {
       <td>${shortTime(c.released)}</td><td>${c.release_msg ? `результат <a href="#" data-act="jump" data-id="${c.release_msg}">#${c.release_msg}</a>` : ""}
       ${esc(c.release_note)}</td></tr>`).join("") : `<tr><td colspan="5" class="muted">Пока нет.</td></tr>`);
 }
+
+// ---- browser notifications (humans only; they work while the page is open in a tab, there is no push)
+const NTF = {reg: null, seen: 0, unread: 0, pending: 0};
+const ntfOK = () => ME && ME.kind === "human" && "Notification" in window;
+function ntfState() {
+  if (Notification.permission === "denied") return "blocked";
+  return st.get("tg_notify") === "1" && Notification.permission === "granted" ? "on" : "off";
+}
+function ntfPaint() {
+  const b = $("bellBtn");
+  b.classList.toggle("hidden", !ntfOK());
+  if (!ntfOK()) return;
+  const s = ntfState();
+  b.classList.toggle("off", s !== "on");
+  b.textContent = s === "on" ? "🔔" : "🔕";
+  b.title = s === "on" ? "уведомления включены: пока вкладка открыта, браузер сообщит о просьбах одобрить, срочных и адресованных тебе (нажми, чтобы выключить)"
+    : s === "blocked" ? "уведомления заблокированы в браузере: разреши их в настройках сайта (значок замка рядом с адресом), потом нажми снова"
+    : "уведомления выключены: нажми, чтобы включить; они приходят, пока вкладка открыта";
+}
+async function ntfRegister() {
+  if (NTF.reg || !("serviceWorker" in navigator)) return;
+  try { NTF.reg = await navigator.serviceWorker.register("/sw.js"); await navigator.serviceWorker.ready; } catch { NTF.reg = null; }
+}
+function ntfInit() {
+  ntfPaint();
+  if (ntfOK() && ntfState() === "on") ntfRegister();
+}
+$("bellBtn").onclick = async () => {
+  const s = ntfState();
+  if (s === "blocked") { toast("Уведомления заблокированы в браузере: разреши их в настройках сайта", true); return; }
+  if (s === "on") st.set("tg_notify", "0");
+  else {
+    let p = Notification.permission;
+    // older browsers take a callback instead of returning a promise
+    if (p === "default") p = await new Promise(r => { const x = Notification.requestPermission(r); if (x && x.then) x.then(r); });
+    if (p === "granted") { st.set("tg_notify", "1"); ntfRegister(); }
+  }
+  ntfPaint();
+};
+function ntfJump(id) { const a = $("ntfJump"); a.dataset.id = id; a.click(); }
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => {
+  if (e.data && e.data.telegentJump) ntfJump(e.data.telegentJump);
+});
+
+// why a new message deserves a notification; null = it does not
+function ntfReason(m) {
+  if (m.author === ME.name) return null;
+  if (m.type === "approval") { const o = MSGS.get(m.reply_to); return o && o.author === ME.name ? "Решение" : null; }
+  if (m.needs_approval && !m.approvals.length && (!m.approver || m.approver === ME.name)) return "Нужно твоё решение";
+  if (m.priority === "urgent") return "Срочно";
+  if (m.to.includes(ME.name)) return "Тебе";
+  return null;
+}
+async function ntfShow(m, why) {
+  const body = String(m.body || m.subject || "").trim().split("\n")[0].slice(0, 140);
+  const title = `${why}: ${ME.project.title} · ${m.author}`;
+  const opts = {body, tag: "telegent-" + m.id, data: {id: m.id}};
+  try { if (NTF.reg) return await NTF.reg.showNotification(title, opts); } catch {}
+  try {
+    const n = new Notification(title, opts);
+    n.onclick = () => { window.focus(); n.close(); ntfJump(m.id); };
+  } catch {}
+}
+function ntfNew(msgs) {
+  if (!ntfOK() || document.visibilityState === "visible" && document.hasFocus()) return;
+  const hidden = document.visibilityState !== "visible", on = ntfState() === "on";
+  for (const m of msgs) {
+    const why = ntfReason(m);
+    if (!why) continue;
+    if (hidden) NTF.unread++;
+    if (on) ntfShow(m, why);
+  }
+  ntfTitle();
+}
+function ntfTitle() {
+  const n = NTF.unread || NTF.pending;
+  document.title = (n ? `(${n}) ` : "") + "telegent";
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { NTF.unread = 0; ntfTitle(); } });
+// ---- end browser notifications
 
 async function poll() {
   if (POLLING) return; POLLING = true;

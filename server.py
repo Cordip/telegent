@@ -1070,7 +1070,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            if "Cache-Control" not in (extra or {}):
+                self.send_header("Cache-Control", "no-store")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -1085,6 +1086,26 @@ def page_index(h, user, q, data):
         h.send_bytes(200, f.read(), "text/html; charset=utf-8",
                      {"Content-Security-Policy": "default-src 'self' 'unsafe-inline'; img-src 'self' data: blob:",
                       "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"})
+
+
+# Android Chrome shows page notifications only through a service worker; this one just handles clicks
+SW_JS = b"""self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  const id = e.notification.data && e.notification.data.id;
+  e.waitUntil(self.clients.matchAll({type: "window", includeUncontrolled: true}).then(list => {
+    const w = list[0];
+    if (!w) return self.clients.openWindow("/");
+    if (id) w.postMessage({telegentJump: id});
+    return w.focus();
+  }));
+});
+"""
+
+
+@route("GET", "/sw.js", auth=False)
+def page_sw(h, user, q, data):
+    h.send_bytes(200, SW_JS, "text/javascript; charset=utf-8",
+                 {"Service-Worker-Allowed": "/", "Cache-Control": "max-age=300"})
 
 
 @route("GET", "/api/info", auth=False)
