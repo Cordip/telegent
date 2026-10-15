@@ -6,6 +6,7 @@ import concurrent.futures
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -63,6 +64,8 @@ class CodexTest(unittest.TestCase):
 
     def setUp(self):
         self.session = str(uuid.uuid4())
+        for m in self.api("GET", "/api/messages?open=1&limit=1000")["messages"]:
+            self.api("POST", f"/api/messages/{m['id']}/status", {"state": "done"})
         incoming = self.api("GET", "/api/messages?for_me=1&unacked=1&limit=1000")["messages"]
         if incoming:
             self.api("POST", "/api/receipts", {"kind": "ack", "ids": [m["id"] for m in incoming]})
@@ -154,7 +157,23 @@ class CodexTest(unittest.TestCase):
         self.assertEqual(self.hook("Stop"), {})
         self.assertIn(f"#{mid}", self.hook("SessionStart")["hookSpecificOutput"]["additionalContext"])
         self.api("POST", "/api/receipts", {"kind": "ack", "ids": [mid]})
+        self.assertIn("ждущих твоего ответа", self.hook("UserPromptSubmit")["hookSpecificOutput"]["additionalContext"])
+        self.api("POST", f"/api/messages/{mid}/status", {"state": "done"})
         self.assertEqual(self.hook("UserPromptSubmit"), {})
+
+    def test_codex_reminds_about_waiting_questions_and_expired_claims(self):
+        mid = self.send(type="question")
+        self.api("POST", "/api/receipts", {"kind": "ack", "ids": [mid]})
+        claim = self.api("POST", "/api/claims", {"key": "PEER_CLAIM_TEXT_DO_NOT_INJECT"})["claim"]
+        with sqlite3.connect(self.db) as con:
+            con.execute("UPDATE claims SET expires = ? WHERE id = ?", (time.time() - 60, claim["id"]))
+        text = self.hook("SessionStart")["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("ждущих твоего ответа", text)
+        self.assertIn("просроченных заявок: 1", text)
+        self.assertNotIn("PEER_CLAIM_TEXT", text)
+        self.assertEqual(self.hook("Stop"), {})
+        self.api("POST", "/api/messages", {"body": "answered", "reply_to": mid, "to": ["alice-agent"]})
+        self.api("POST", "/api/claims/release", {"id": claim["id"]})
 
     def test_invalid_input_and_config_fail_open(self):
         for raw in ("not json", "[]", "{}", '"text"', "x" * (1024 * 1024 + 1)):

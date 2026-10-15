@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>telegent</title>
+<!-- inline SVG icon (CSP allows data: images): a chat bubble with a robot face; the same line is in gh-pages index.html -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f5bd3'/%3E%3Ccircle cx='16' cy='5.6' r='1.9' fill='%23fff'/%3E%3Crect x='15.1' y='6' width='1.8' height='4' fill='%23fff'/%3E%3Cpath d='M10 9.5h12a4 4 0 0 1 4 4v6a4 4 0 0 1-4 4h-6.8l-4.7 3.9v-3.9H10a4 4 0 0 1-4-4v-6a4 4 0 0 1 4-4z' fill='%23fff'/%3E%3Ccircle cx='12.4' cy='16.5' r='2.1' fill='%232f5bd3'/%3E%3Ccircle cx='19.6' cy='16.5' r='2.1' fill='%232f5bd3'/%3E%3C/svg%3E">
 <style>
 :root {
   --bg: #f6f6f3; --panel: #ffffff; --ink: #1c1d1f; --muted: #6b6f76; --line: #e3e3de;
@@ -56,6 +58,7 @@ header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
 .msg.highlight { outline: 2px solid var(--accent); }
 .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); }
 .chip { background: var(--chip); border-radius: 999px; padding: 1px 8px; font-size: 12px; color: var(--ink); white-space: nowrap; }
+#bellBtn.off { opacity: .55; }
 .chip.urgent { background: var(--urgent-bg); color: var(--urgent); font-weight: 600; }
 .chip.human { background: var(--human-bg); color: var(--human); font-weight: 600; }
 .chip.need { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
@@ -75,6 +78,7 @@ header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
 aside .panel { margin-bottom: 14px; }
 aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 8px; }
 .board-item { border-top: 1px solid var(--line); padding: 6px 0; font-size: 13px; overflow-wrap: anywhere; }
+.stale { color: var(--warn); font-size: 12px; }
 .board-item:first-of-type { border-top: 0; }
 .err { color: var(--urgent); font-size: 13px; margin-top: 6px; white-space: pre-wrap; }
 .err:empty { display: none; }
@@ -241,6 +245,10 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .mappr { border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent); background: var(--warn-bg); border-radius: 8px;
   padding: 7px 9px; margin: 6px 0 2px; font-size: 13px; }
 .mappr .actions { margin-top: 6px; }
+@media (max-width: 480px) {
+  .mappr .actions { flex-wrap: nowrap; }
+  .mappr .actions button { flex: 1 1 0; min-height: 40px; font-size: 14px; }
+}
 .mrc { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 .mrc .ok2 { color: var(--accent); }
 .mrc.soft { visibility: hidden; height: 0; margin: 0; }
@@ -444,9 +452,11 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
     <span class="dot" id="conn" title="связь"></span>
     <span class="muted" id="meLabel"></span>
     <span style="flex:1"></span>
+    <span class="chip need hidden" id="waitChip" style="cursor:pointer" title="вопросы и просьбы лично тебе, на которые нет ответа: показать"></span>
     <span class="chip need hidden" id="pendingChip"></span>
     <button id="projBtn" title="проекты">Проекты</button>
     <button id="sideBtn" title="участники и доска статуса">Статус</button>
+    <button id="bellBtn" class="hidden"></button><a id="ntfJump" data-act="jump" hidden></a>
     <button id="themeBtn" title="тема">◐</button>
     <button id="pwBtn" class="hidden" title="задать или сменить пароль для входа">Пароль</button>
     <button id="logoutBtn">Выйти</button>
@@ -471,6 +481,7 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
           <select id="fType"><option value="">все типы</option></select>
           <label><input type="checkbox" id="fOpen"> открытые</label>
           <label><input type="checkbox" id="fPending"> ждут одобрения</label>
+          <label><input type="checkbox" id="fWaiting"> ждут моего ответа</label>
           <label><input type="checkbox" id="fSystem" checked> статусы</label>
         </div>
         <div id="threadBar" class="panel hidden" style="margin-bottom:10px"></div>
@@ -517,6 +528,7 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
               <input type="text" id="cTopic" list="topicList" placeholder="#топик" title="топик">
               <label class="tog" title="меняет чужую работу прямо сейчас"><input type="checkbox" id="cUrgent"> срочно</label>
               <label class="tog" title="деньги или необратимое: исполнитель ждёт «да» своего человека"><input type="checkbox" id="cApproval"> нужно одобрение</label>
+              <select id="cApprover" class="hidden" title="кто решает"></select>
             </div>
           </div>
           <datalist id="topicList"></datalist>
@@ -651,6 +663,7 @@ async function login(tok) {
   $("login").classList.add("hidden"); $("app").classList.remove("hidden");
   $("meLabel").textContent = `${ME.name} (${ME.kind === "human" ? "человек" : "агент"})`;
   $("pwBtn").classList.toggle("hidden", ME.kind !== "human");
+  ntfInit();
   $("pwBtn").textContent = ME.has_password ? "Пароль" : "Задать пароль";
   $("acctPw").textContent = $("pwBtn").textContent;
   $("acctPw").classList.toggle("hidden", ME.kind !== "human");
@@ -681,7 +694,7 @@ function showNoProject() {
 async function setProject(slug) {
   PROJECT = slug; st.set("tg_project", slug);
   if (POLL_ABORT) POLL_ABORT.abort();   // the running long-poll belongs to the previous project
-  MSGS = new Map(); LAST = 0; OLDEST = null; SIG = ""; UNSEEN = 0; THREAD = null;
+  MSGS = new Map(); LAST = 0; OLDEST = null; SIG = ""; UNSEEN = 0; THREAD = null; NTF.seen = 0;
   UNREAD_FROM = seen(slug);
   try { ME = await api("GET", "/api/me"); }
   catch (e) { if (/проекта/.test(e.message)) { PROJECT = null; return login(TOKEN); } throw e; }
@@ -788,6 +801,8 @@ function setupCompose() {
   $("fType").innerHTML = `<option value="">все типы</option>` + Object.keys(TYPES).map(t => `<option value="${t}">${TYPES[t]}</option>`).join("");
   $("cTo").innerHTML = `<option value="">всем</option>` + ME.users.filter(u => u.name !== ME.name)
     .map(u => `<option value="${esc(u.name)}">${esc(u.name)}</option>`).join("");
+  $("cApprover").innerHTML = `<option value="">кто решает: любой человек</option>` + ME.users.filter(u => u.kind === "human")
+    .map(u => `<option value="${esc(u.name)}">кто решает: ${esc(u.name)}</option>`).join("");
 }
 
 function filterQuery() {
@@ -798,6 +813,7 @@ function filterQuery() {
   else if (!$("fSystem").checked) q.set("type", "info,request,question,result,alert,decision");
   if ($("fOpen").checked) q.set("open", "1");
   if ($("fPending").checked) q.set("pending_approval", "1");
+  if ($("fWaiting").checked) q.set("waiting_me", "1");
   if (THREAD) q.set("thread", THREAD);
   return q;
 }
@@ -823,6 +839,7 @@ async function reload() {
   OLDEST = res.messages.length ? res.messages[0].id : null;
   NO_MORE = res.messages.length < PAGE;
   LAST = Math.max(LAST, res.last_id);
+  NTF.seen = Math.max(NTF.seen, res.last_id);   // what is on the page now is not news
   online(); render(true); toBottom(); refreshSide();
 }
 
@@ -837,6 +854,7 @@ async function refresh() {
   MSGS = new Map(res.messages.map(m => [m.id, m]));
   if (!OLDEST && res.messages.length) OLDEST = res.messages[0].id;
   LAST = Math.max(LAST, res.last_id);
+  ntfNew(res.messages.filter(m => m.id > NTF.seen)); NTF.seen = Math.max(NTF.seen, res.last_id);
   online();
   if (!render()) return;
   if (stick) toBottom(); else if (fresh) { UNSEEN += fresh; updateNewBtn(); }
@@ -863,15 +881,19 @@ new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) loadOlder()
 
 let searchTimer = null;
 $("q").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(reload, 300); };
-for (const id of ["fTopic", "fType", "fOpen", "fPending", "fSystem"]) $(id).onchange = reload;
+for (const id of ["fTopic", "fType", "fOpen", "fPending", "fWaiting", "fSystem"]) $(id).onchange = reload;
+$("waitChip").onclick = () => {
+  $("fWaiting").checked = true; $("fType").value = "";
+  $("filters").classList.add("open"); updateFilterCount(); reload();
+};
 $("filtersBtn").onclick = () => { $("filters").classList.toggle("open"); if ($("filters").classList.contains("open")) $("q").focus(); };
 function updateFilterCount() {
-  const n = [$("q").value.trim(), $("fTopic").value, $("fType").value, $("fOpen").checked, $("fPending").checked, !$("fSystem").checked]
+  const n = [$("q").value.trim(), $("fTopic").value, $("fType").value, $("fOpen").checked, $("fPending").checked, $("fWaiting").checked, !$("fSystem").checked]
     .filter(Boolean).length;
   $("filtersBtn").innerHTML = `<span class="sm">🔍</span><span class="lg">Поиск и фильтры</span>` + (n ? `<span class="fcount">${n}</span>` : "");
 }
-for (const id of ["q", "fTopic", "fType", "fOpen", "fPending", "fSystem"]) $(id).addEventListener("input", updateFilterCount);
-for (const id of ["fTopic", "fType", "fOpen", "fPending", "fSystem"]) $(id).addEventListener("change", updateFilterCount);
+for (const id of ["q", "fTopic", "fType", "fOpen", "fPending", "fWaiting", "fSystem"]) $(id).addEventListener("input", updateFilterCount);
+for (const id of ["fTopic", "fType", "fOpen", "fPending", "fWaiting", "fSystem"]) $(id).addEventListener("change", updateFilterCount);
 
 // returns false when nothing changed (the poll refreshes every ~25 s; don't repaint for nothing)
 function render(force) {
@@ -945,8 +967,11 @@ function row(m, prev) {
   }
   if (m.needs_approval) {
     const decided = m.approvals.map(a => `${a.decision === "approve" ? "✔ одобрил" : "✘ отказал"} ${esc(a.by)} ${hhmm(a.time)}${a.note ? ": " + esc(a.note) : ""}`);
-    html += `<div class="mappr"><b>Нужно одобрение человека.</b> ${decided.length ? decided.join("; ") : "Решения пока нет."}` +
-      (ME.kind === "human" ? `<div class="actions"><button class="ok" data-act="approve" data-id="${m.id}">Одобрить</button>` +
+    const canDecide = ME.kind === "human" && (!m.approver || m.approver === ME.name);
+    const head = m.approver ? `Нужно одобрение: ${esc(m.approver)}.` : "Нужно одобрение человека.";
+    html += `<div class="mappr"><b>${head}</b> ${decided.length ? decided.join("; ") : "Решения пока нет."}` +
+      (ME.kind === "human" && !canDecide ? ` <span class="muted">Решает ${esc(m.approver)}.</span>` : "") +
+      (canDecide ? `<div class="actions"><button class="ok" data-act="approve" data-id="${m.id}">Одобрить</button>` +
         `<button class="bad" data-act="deny" data-id="${m.id}">Отказать</button></div>` : "") + `</div>`;
   }
   if ((m.receipts || []).length) {   // delivery to each addressee: people oversee who got what
@@ -971,7 +996,7 @@ function row(m, prev) {
 // everything one can do with a message (the ⋯ menu, and a tap on phones)
 function actionsFor(m) {
   const a = [{label: "↩ Ответить", act: "reply", data: {id: m.id}}, {label: "≡ Вся ветка", act: "thread", data: {id: m.thread_id}}];
-  if (m.needs_approval && ME.kind === "human") {
+  if (m.needs_approval && ME.kind === "human" && (!m.approver || m.approver === ME.name)) {
     a.push({label: "✔ Одобрить", act: "approve", data: {id: m.id}, cls: "ok"});
     a.push({label: "✘ Отказать", act: "deny", data: {id: m.id}, cls: "bad"});
   }
@@ -1090,7 +1115,8 @@ function updateChips() {
   if ($("cType").value !== "info") chips.push(["type", TYPES[$("cType").value]]);
   if ($("cTopic").value.trim()) chips.push(["topic", "#" + $("cTopic").value.trim().replace(/^#/, "")]);
   if ($("cUrgent").checked) chips.push(["urgent", "срочно"]);
-  if ($("cApproval").checked) chips.push(["approval", "нужно одобрение"]);
+  if ($("cApproval").checked) chips.push(["approval", "нужно одобрение" + ($("cApprover").value ? ": " + $("cApprover").value : "")]);
+  $("cApprover").classList.toggle("hidden", !$("cApproval").checked);
   $("cChips").innerHTML = chips.map(([k, t]) => `<span class="cchip">${esc(t)}<button type="button" data-chip="${k}" title="убрать">✕</button></span>`).join("");
   $("cOptsBtn").classList.toggle("on", chips.length > 0 || !$("cOpts").classList.contains("hidden"));
   $("cBody").placeholder = REPLY ? `Ответ ${REPLY.author}…` : ME && ME.project ? `Сообщение в «${ME.project.title}»` : "Сообщение";
@@ -1101,11 +1127,11 @@ $("cChips").onclick = e => {
   if (k === "type") $("cType").value = "info";
   if (k === "topic") $("cTopic").value = "";
   if (k === "urgent") $("cUrgent").checked = false;
-  if (k === "approval") $("cApproval").checked = false;
+  if (k === "approval") { $("cApproval").checked = false; $("cApprover").value = ""; }
   updateChips();
 };
 $("cOptsBtn").onclick = () => { $("cOpts").classList.toggle("hidden"); updateChips(); };
-for (const id of ["cType", "cTopic", "cUrgent", "cApproval"]) $(id).addEventListener("change", updateChips);
+for (const id of ["cType", "cTopic", "cUrgent", "cApproval", "cApprover"]) $(id).addEventListener("change", updateChips);
 $("cTopic").addEventListener("input", updateChips);
 
 function startReply(m) {
@@ -1119,7 +1145,7 @@ function startReply(m) {
 function resetCompose() {
   REPLY = null; $("replyBar").classList.add("hidden");
   $("cBody").value = ""; $("cFiles").value = ""; $("cFilesInfo").textContent = ""; $("cTo").value = "";
-  $("cUrgent").checked = false; $("cApproval").checked = false; $("sendErr").textContent = "";
+  $("cUrgent").checked = false; $("cApproval").checked = false; $("cApprover").value = ""; $("sendErr").textContent = "";
   $("cType").value = "info"; $("cTopic").value = ""; $("cOpts").classList.add("hidden");
   updateChips();
   growBody();
@@ -1160,6 +1186,7 @@ $("sendBtn").onclick = async () => {
   const data = {
     type: $("cType").value, topic: $("cTopic").value.trim().replace(/^#/, ""), body: $("cBody").value,
     priority: $("cUrgent").checked ? "urgent" : "normal", needs_approval: $("cApproval").checked,
+    approver: $("cApproval").checked && $("cApprover").value ? $("cApprover").value : null,
     to: $("cTo").value ? [$("cTo").value] : [], attachments,
     reply_to: REPLY ? REPLY.id : null, idem_key: crypto.randomUUID ? crypto.randomUUID() : String(Math.random()),
   };
@@ -1488,12 +1515,20 @@ async function joinFlow(code) {
   };
 }
 
+function spanRu(sec) {
+  sec = Math.abs(sec);
+  if (sec < 3600) return Math.max(1, Math.round(sec / 60)) + " мин";
+  if (sec < 86400) return Math.round(sec / 3600) + " ч";
+  return Math.round(sec / 86400) + " дн";
+}
+
 async function loadBoard() {
   loadPresence();
   try {
     const res = await api("GET", "/api/board");
     $("board").classList.toggle("muted", !res.board.length);
-    $("board").innerHTML = res.board.length ? res.board.map(b => `<div class="board-item"><b>${esc(b.name)}</b> <span class="muted">${shortTime(b.time)}</span>
+    $("board").innerHTML = res.board.length ? res.board.map(b => `<div class="board-item"><b>${esc(b.name)}</b> <span class="muted">${shortTime(b.time)}${b.age != null ? ", обновлено " + spanRu(b.age) + " назад" : ""}</span>${b.age > 86400 ? ` <span class="stale">давно не обновлялась</span>` : ""}
+      ${b.back ? `<div>вернётся: ${esc(b.back)}</div>` : ""}
       ${b.now ? `<div>сейчас: ${esc(b.now)}</div>` : ""}${b.next ? `<div>дальше: ${esc(b.next)}</div>` : ""}
       ${b.gpu_until ? `<div>карта занята до: ${esc(b.gpu_until)}</div>` : ""}${b.note ? `<div class="muted">${esc(b.note)}</div>` : ""}</div>`).join("")
       : "Пока никто не заполнил (агенты: <code>tg.py board set</code>).";
@@ -1507,12 +1542,17 @@ async function refreshSide() {
     const cur = $("fTopic").value;
     $("fTopic").innerHTML = `<option value="">все топики</option>` + topics.map(t => `<option ${t === cur ? "selected" : ""}>${esc(t)}</option>`).join("");
     $("topicList").innerHTML = topics.map(t => `<option value="${esc(t)}">`).join("");
-    const pend = await api("GET", "/api/messages?pending_approval=1&limit=100&full=0");
+    const pend = await api("GET", "/api/messages?pending_approval=" + (ME.kind === "human" ? "mine" : "1") + "&limit=100&full=0");
     const n = pend.messages.length;
     $("pendingChip").classList.toggle("hidden", !n);
-    $("pendingChip").innerHTML = `<span class="lg">ждут одобрения: ${n}</span><span class="sm">⚠ ${n}</span>`;
-    $("pendingChip").title = "ждут одобрения человека: " + n + " (фильтр «ждут одобрения» в поиске)";
-    document.title = (n ? `(${n}) ` : "") + "telegent";
+    $("pendingChip").innerHTML = `<span class="lg">${ME.kind === "human" ? "ждут твоего решения" : "ждут одобрения"}: ${n}</span><span class="sm">⚠ ${n}</span>`;
+    $("pendingChip").title = (ME.kind === "human" ? "ждут твоего решения: " : "ждут одобрения человека: ") + n + " (фильтр «ждут одобрения» в поиске)";
+    NTF.pending = n; ntfTitle();
+    if (ME.kind === "human") {
+      const w = (await api("GET", "/api/messages?waiting_me=1&limit=100&full=0")).messages.length;
+      $("waitChip").classList.toggle("hidden", !w);
+      $("waitChip").innerHTML = `<span class="lg">ждут твоего ответа: ${w}</span><span class="sm">? ${w}</span>`;
+    }
   } catch {}
 }
 
@@ -1590,7 +1630,7 @@ async function loadClaims() {
   const [act, rel] = await Promise.all([api("GET", "/api/claims?active=1"), api("GET", "/api/claims?active=0&limit=20")]);
   const human = ME.kind === "human";
   $("claimsTable").innerHTML = `<tr><th>эксперимент</th><th>кто</th><th>топик</th><th>с</th><th>до</th><th>заметка</th><th></th></tr>` +
-    (act.claims.length ? act.claims.map(c => `<tr><td><b>${esc(c.key)}</b></td><td>${esc(c.owner)}</td><td>${esc(c.topic)}</td>
+    (act.claims.length ? act.claims.map(c => `<tr><td><b>${esc(c.key)}</b>${c.expired ? ` <span class="muted">просрочена ${spanRu(c.expires_in)} назад</span>` : (c.expires_in != null ? ` <span class="muted">ещё ${spanRu(c.expires_in)}</span>` : "")}</td><td>${esc(c.owner)}</td><td>${esc(c.topic)}</td>
       <td>${shortTime(c.created)}</td><td>${esc(c.until)}</td><td>${esc(c.note)}</td>
       <td>${human ? `<button class="bad" data-act="unclaim" data-id="${c.id}">Снять</button>` : ""}</td></tr>`).join("")
       : `<tr><td colspan="7" class="muted">Ничего не занято (агенты: <code>tg.py claim "ключ"</code> перед запуском на GPU).</td></tr>`);
@@ -1599,6 +1639,86 @@ async function loadClaims() {
       <td>${shortTime(c.released)}</td><td>${c.release_msg ? `результат <a href="#" data-act="jump" data-id="${c.release_msg}">#${c.release_msg}</a>` : ""}
       ${esc(c.release_note)}</td></tr>`).join("") : `<tr><td colspan="5" class="muted">Пока нет.</td></tr>`);
 }
+
+// ---- browser notifications (humans only; they work while the page is open in a tab, there is no push)
+const NTF = {reg: null, seen: 0, unread: 0, pending: 0};
+const ntfOK = () => ME && ME.kind === "human" && "Notification" in window;
+function ntfState() {
+  if (Notification.permission === "denied") return "blocked";
+  return st.get("tg_notify") === "1" && Notification.permission === "granted" ? "on" : "off";
+}
+function ntfPaint() {
+  const b = $("bellBtn");
+  b.classList.toggle("hidden", !ntfOK());
+  if (!ntfOK()) return;
+  const s = ntfState();
+  b.classList.toggle("off", s !== "on");
+  b.textContent = s === "on" ? "🔔" : "🔕";
+  b.title = s === "on" ? "уведомления включены: пока вкладка открыта, браузер сообщит о просьбах одобрить, срочных и адресованных тебе (нажми, чтобы выключить)"
+    : s === "blocked" ? "уведомления заблокированы в браузере: разреши их в настройках сайта (значок замка рядом с адресом), потом нажми снова"
+    : "уведомления выключены: нажми, чтобы включить; они приходят, пока вкладка открыта";
+}
+async function ntfRegister() {
+  if (NTF.reg || !("serviceWorker" in navigator)) return;
+  try { NTF.reg = await navigator.serviceWorker.register("/sw.js"); await navigator.serviceWorker.ready; } catch { NTF.reg = null; }
+}
+function ntfInit() {
+  ntfPaint();
+  if (ntfOK() && ntfState() === "on") ntfRegister();
+}
+$("bellBtn").onclick = async () => {
+  const s = ntfState();
+  if (s === "blocked") { toast("Уведомления заблокированы в браузере: разреши их в настройках сайта", true); return; }
+  if (s === "on") st.set("tg_notify", "0");
+  else {
+    let p = Notification.permission;
+    // older browsers take a callback instead of returning a promise
+    if (p === "default") p = await new Promise(r => { const x = Notification.requestPermission(r); if (x && x.then) x.then(r); });
+    if (p === "granted") { st.set("tg_notify", "1"); ntfRegister(); }
+  }
+  ntfPaint();
+};
+function ntfJump(id) { const a = $("ntfJump"); a.dataset.id = id; a.click(); }
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => {
+  if (e.data && e.data.telegentJump) ntfJump(e.data.telegentJump);
+});
+
+// why a new message deserves a notification; null = it does not
+function ntfReason(m) {
+  if (m.author === ME.name) return null;
+  if (m.type === "approval") { const o = MSGS.get(m.reply_to); return o && o.author === ME.name ? "Решение" : null; }
+  if (m.needs_approval && !m.approvals.length && (!m.approver || m.approver === ME.name)) return "Нужно твоё решение";
+  if (m.priority === "urgent") return "Срочно";
+  if (m.to.includes(ME.name)) return "Тебе";
+  return null;
+}
+async function ntfShow(m, why) {
+  const body = String(m.body || m.subject || "").trim().split("\n")[0].slice(0, 140);
+  const title = `${why}: ${ME.project.title} · ${m.author}`;
+  const opts = {body, tag: "telegent-" + m.id, data: {id: m.id}};
+  try { if (NTF.reg) return await NTF.reg.showNotification(title, opts); } catch {}
+  try {
+    const n = new Notification(title, opts);
+    n.onclick = () => { window.focus(); n.close(); ntfJump(m.id); };
+  } catch {}
+}
+function ntfNew(msgs) {
+  if (!ntfOK() || document.visibilityState === "visible" && document.hasFocus()) return;
+  const hidden = document.visibilityState !== "visible", on = ntfState() === "on";
+  for (const m of msgs) {
+    const why = ntfReason(m);
+    if (!why) continue;
+    if (hidden) NTF.unread++;
+    if (on) ntfShow(m, why);
+  }
+  ntfTitle();
+}
+function ntfTitle() {
+  const n = NTF.unread || NTF.pending;
+  document.title = (n ? `(${n}) ` : "") + "telegent";
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { NTF.unread = 0; ntfTitle(); } });
+// ---- end browser notifications
 
 async function poll() {
   if (POLLING) return; POLLING = true;

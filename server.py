@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS messages(
   priority TEXT NOT NULL DEFAULT 'normal', subject TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '',
   reply_to INTEGER, thread_id INTEGER, needs_approval INTEGER NOT NULL DEFAULT 0,
   status TEXT, status_by TEXT, status_ts REAL, status_ref TEXT, status_note TEXT,
-  result TEXT, idem_key TEXT,
+  result TEXT, idem_key TEXT, approver TEXT,
   UNIQUE(author, idem_key));
 CREATE INDEX IF NOT EXISTS ix_msg_thread ON messages(thread_id);
 CREATE TABLE IF NOT EXISTS approvals(
@@ -185,7 +185,9 @@ def db():
                                  ("users", "last_wait_ts", "REAL"), ("users", "pw_hash", "TEXT"),
                                  ("users", "last_check_ts", "REAL"),
                                  ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
-                                 ("messages", "project_id", "INTEGER"), ("claims", "project_id", "INTEGER"),
+                                 ("messages", "project_id", "INTEGER"), ("messages", "approver", "TEXT"),
+                                 ("claims", "project_id", "INTEGER"),
+                                 ("claims", "expires", "REAL"),
                                  ("invites", "project_id", "INTEGER"), ("invites", "role", "TEXT")):
             if col not in {r[1] for r in _db.execute(f"PRAGMA table_info({table})")}:
                 _db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
@@ -199,6 +201,8 @@ def db():
                 INSERT INTO board(project_id, name, now, next, gpu_until, note, ts)
                   SELECT 0, name, now, next, gpu_until, note, ts FROM board_old;
                 DROP TABLE board_old;""")
+        if "back" not in {r[1] for r in _db.execute("PRAGMA table_info(board)")}:
+            _db.execute("ALTER TABLE board ADD COLUMN back TEXT")
         _db.create_function("pylower", 1, lambda s: s.lower() if isinstance(s, str) else s)
         ensure_default_project(_db)
         # messages used to have a separate subject; now it is the first line of the text (idempotent)
@@ -592,7 +596,7 @@ def msg_dicts(rows, me=None, full=True):
             "priority": r["priority"], "subject": r["subject"],
             "body": r["body"] if full else r["body"][:400],
             "reply_to": r["reply_to"], "thread_id": r["thread_id"],
-            "needs_approval": bool(r["needs_approval"]),
+            "needs_approval": bool(r["needs_approval"]), "approver": r["approver"],
             "approvals": approvals.get(r["id"], []),
             "status": None if r["status"] is None else {
                 "state": r["status"], "by": r["status_by"], "time": iso(r["status_ts"]),
@@ -673,6 +677,15 @@ def insert_message(user, host, data, pid, system=False):
         result = result or None
 
     needs_approval = bool(data.get("needs_approval")) or mtype == "decision"
+    approver = str(data.get("approver") or "").strip() or None
+    if approver:
+        needs_approval = True
+        row = con.execute("SELECT u.kind FROM members m JOIN users u ON u.name = m.user "
+                          "WHERE m.project_id = ? AND m.user = ? AND u.revoked = 0", (pid, approver)).fetchone()
+        if not row or row["kind"] != "human":
+            raise ApiError(400, "одобряющий должен быть человеком из этого проекта")
+        if to and approver not in to and approver != user["name"]:
+            to.append(approver)   # the request must reach the person who decides
     status = "open" if mtype in TRACKED_TYPES else None
 
     # attachments: decode + validate before writing anything
@@ -716,12 +729,12 @@ def insert_message(user, host, data, pid, system=False):
         try:
             cur = con.execute(
                 "INSERT INTO messages(ts, author, author_kind, owner, host, recipients, topic, type, priority,"
-                " subject, body, reply_to, thread_id, needs_approval, status, result, idem_key, project_id)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " subject, body, reply_to, thread_id, needs_approval, status, result, idem_key, project_id, approver)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (time.time(), user["name"], user["kind"], user["owner"], (host or "")[:120],
                  ("," + ",".join(to) + ",") if to else "", topic, mtype, priority, subject, body,
                  reply_to, thread_id, int(needs_approval), status,
-                 json.dumps(result, ensure_ascii=False) if result else None, idem, pid))
+                 json.dumps(result, ensure_ascii=False) if result else None, idem, pid, approver))
             mid = cur.lastrowid
             if thread_id is None:
                 con.execute("UPDATE messages SET thread_id = ? WHERE id = ?", (mid, mid))
@@ -746,6 +759,26 @@ def get_message_row(mid, user=None):
     if not r or (user is not None and not member_role(r["project_id"], user["name"])):
         raise ApiError(404, f"сообщения #{mid} нет")
     return r
+
+
+# Placeholders: me (author), "%,me,%" (explicit recipient only: broadcasts do not nag), me (reply author).
+# An ack is a receipt, not a message, so it never answers a question; a later message of mine in the thread does.
+WAITING_SQL = ("(m.author != ? AND m.recipients LIKE ? AND ((m.type = 'request' AND m.status = 'open') OR"
+               " (m.type = 'question' AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.thread_id = m.thread_id"
+               " AND r.id > m.id AND r.author = ? AND r.type NOT IN ('status','approval')))))")
+
+
+def waiting_summary(me, pid):
+    """Counts and ages of what waits for me and of requests I took and did not close (for the hook and inbox)."""
+    con, now = db(), time.time()
+    rows = con.execute(f"SELECT m.id, m.type, m.author, m.ts FROM messages m WHERE m.project_id = ? AND {WAITING_SQL}"
+                       " ORDER BY m.id", (pid, me, f"%,{me},%", me)).fetchall()
+    taken = con.execute("SELECT id, ts FROM messages WHERE project_id = ? AND type = 'request' AND status = 'taken'"
+                        " AND status_by = ? ORDER BY id", (pid, me)).fetchall()
+    return {"waiting_me": {"count": len(rows), "oldest_age": round(now - rows[0]["ts"]) if rows else None,
+                           "items": [{"id": r["id"], "type": r["type"], "author": r["author"]} for r in rows[:10]]},
+            "taken_open": {"count": len(taken), "oldest_age": round(now - taken[0]["ts"]) if taken else None,
+                           "ids": [r["id"] for r in taken[:10]]}}
 
 
 def list_messages(me, q, pid):
@@ -779,6 +812,9 @@ def list_messages(me, q, pid):
     if q.get("for_me") == "1":
         where.append("m.author != ? AND (m.recipients = '' OR m.recipients LIKE ?)")
         args += [me["name"], f"%,{me['name']},%"]
+    if q.get("waiting_me") == "1":
+        where.append(WAITING_SQL)
+        args += [me["name"], f"%,{me['name']},%", me["name"]]
     if q.get("unacked") == "1":
         where.append("NOT EXISTS (SELECT 1 FROM receipts r WHERE r.user = ? AND r.message_id = m.id"
                      " AND r.ack_ts IS NOT NULL)")
@@ -789,8 +825,11 @@ def list_messages(me, q, pid):
         args.append(me["name"])
     if q.get("open") == "1":
         where.append("m.status IN ('open','taken')")
-    if q.get("pending_approval") == "1":
+    if q.get("pending_approval") in ("1", "mine"):
         where.append("m.needs_approval = 1 AND NOT EXISTS (SELECT 1 FROM approvals a WHERE a.message_id = m.id)")
+        if q["pending_approval"] == "mine":
+            where.append("(m.approver = ? OR m.approver IS NULL)")
+            args.append(me["name"])
     if q.get("results") == "1":
         where.append("m.result IS NOT NULL")
     limit = max(1, min(int(q.get("limit") or 50), 1000))
@@ -851,6 +890,8 @@ def set_approval(me, host, mid, data):
     m = get_message_row(mid, me)
     if not m["needs_approval"]:
         raise ApiError(400, f"#{mid} не просит одобрения")
+    if m["approver"] and m["approver"] != me["name"]:
+        raise ApiError(403, f"решение по #{mid} принимает только {m['approver']}")
     now = time.time()
     with DB_LOCK:
         db().execute("INSERT OR REPLACE INTO approvals(message_id, user, decision, note, ts) VALUES (?,?,?,?,?)",
@@ -869,8 +910,14 @@ def norm_key(s):
     return " ".join(str(s or "").lower().split())
 
 
+CLAIM_HOURS = 24      # default lifetime of a claim: a forgotten one must not block others forever
+
+
 def claim_dict(r):
-    return {"id": r["id"], "key": r["display_key"], "norm_key": r["key"], "topic": r["topic"], "owner": r["owner"],
+    exp = r["expires"]        # NULL = old claim, never expires
+    left = round(exp - time.time()) if exp is not None and r["released"] is None else None
+    return {"expires": iso(exp), "expires_in": left, "expired": left is not None and left < 0,
+            "id": r["id"], "key": r["display_key"], "norm_key": r["key"], "topic": r["topic"], "owner": r["owner"],
             "owner_kind": r["owner_kind"], "host": r["host"], "note": r["note"], "until": r["until"],
             "created": iso(r["created"]), "released": iso(r["released"]), "active": r["released"] is None,
             "release_note": r["release_note"], "release_msg": r["release_msg"]}
@@ -1027,7 +1074,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            if "Cache-Control" not in (extra or {}):
+                self.send_header("Cache-Control", "no-store")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -1042,6 +1090,26 @@ def page_index(h, user, q, data):
         h.send_bytes(200, f.read(), "text/html; charset=utf-8",
                      {"Content-Security-Policy": "default-src 'self' 'unsafe-inline'; img-src 'self' data: blob:",
                       "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"})
+
+
+# Android Chrome shows page notifications only through a service worker; this one just handles clicks
+SW_JS = b"""self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  const id = e.notification.data && e.notification.data.id;
+  e.waitUntil(self.clients.matchAll({type: "window", includeUncontrolled: true}).then(list => {
+    const w = list[0];
+    if (!w) return self.clients.openWindow("/");
+    if (id) w.postMessage({telegentJump: id});
+    return w.focus();
+  }));
+});
+"""
+
+
+@route("GET", "/sw.js", auth=False)
+def page_sw(h, user, q, data):
+    h.send_bytes(200, SW_JS, "text/javascript; charset=utf-8",
+                 {"Service-Worker-Allowed": "/", "Cache-Control": "max-age=300"})
 
 
 @route("GET", "/api/info", auth=False)
@@ -1436,13 +1504,14 @@ def api_summary(h, user, q, data):
         shown = unacked[-max(1, min(int(q.get("limit") or 10), 50)):]
         if shown:
             mark(user, [m["id"] for m in shown], "delivered")
-        claims = [] if q.get("metadata") == "1" else [
-            {k: c[k] for k in ("id", "key", "owner", "topic", "until", "created")}
-            for c in list_claims({"active": "1"}, p["id"])]
+        claim_fields = ("id", "owner", "created", "expired", "expires_in") if q.get("metadata") == "1" else \
+                       ("id", "key", "owner", "topic", "until", "created", "expired", "expires_in")
+        claims = [{k: c[k] for k in claim_fields} for c in list_claims({"active": "1"}, p["id"])]
+        wait = waiting_summary(user["name"], p["id"])
     if q.get("metadata") == "1":
         shown = [{k: m[k] for k in ("id", "author", "type", "priority", "read")} for m in shown]
     return {"name": user["name"], "listening": me["listening"], "last_listen": me["last_listen"],
-            "unacked_total": len(unacked), "unacked": shown, "last_id": LAST_ID[0], "claims": claims}
+            "unacked_total": len(unacked), "unacked": shown, "last_id": LAST_ID[0], "claims": claims, **wait}
 
 
 @route("GET", "/api/messages")
@@ -1476,6 +1545,10 @@ def api_send(h, user, q, data):
         expected = set(expected_recipients(p["id"], user["name"], recipients_list(m["recipients"])))
         offline = [dict(name=u["name"], last_listen=u["last_listen"], last_check=u["last_check"]) for u in users_with_presence(p["id"])
                    if u["name"] in expected and not u["listening"]]
+        for o in offline:     # the recipient's board entry tells when they may be back
+            b = db().execute("SELECT * FROM board WHERE project_id = ? AND name = ?", (p["id"], o["name"])).fetchone()
+            if b and b["ts"]:
+                o.update(board_now=b["now"], board_back=b["back"], board_age=round(time.time() - b["ts"]))
     res = {"id": mid, "duplicate": dup, "not_listening": offline}
     if warnings:
         res["warnings"] = warnings
@@ -1572,14 +1645,15 @@ def api_board(h, user, q, data):
     with DB_LOCK:
         rows = db().execute("SELECT * FROM board WHERE project_id = ? ORDER BY name", (p["id"],)).fetchall()
     return {"board": [{"name": r["name"], "now": r["now"], "next": r["next"], "gpu_until": r["gpu_until"],
-                       "note": r["note"], "time": iso(r["ts"])} for r in rows]}
+                       "note": r["note"], "back": r["back"], "time": iso(r["ts"]),
+                       "age": round(time.time() - r["ts"]) if r["ts"] else None} for r in rows]}
 
 
 @route("POST", "/api/board")
 def api_board_set(h, user, q, data):
     p = project_for(h, user, q)
     vals = {}
-    for k in ("now", "next", "gpu_until", "note"):
+    for k in ("now", "next", "gpu_until", "note", "back"):
         v = data.get(k)
         if v is not None:
             v = str(v)[:500]
@@ -1611,27 +1685,42 @@ def api_claim(h, user, q, data):
     p = project_for(h, user, q)
     vals = {"topic": claim_text(data, "topic", 60), "note": claim_text(data, "note", 500),
             "until": claim_text(data, "until", 100)}
+    try:
+        hours = float(data["hours"]) if data.get("hours") is not None else CLAIM_HOURS
+    except (TypeError, ValueError):
+        raise ApiError(400, "hours должно быть числом (часы, можно дробное)")
+    if not 0 < hours <= 24 * 365:
+        raise ApiError(400, "hours должно быть больше 0 и не больше года")
+    expires = time.time() + hours * 3600
     with DB_LOCK:
         con = db()
         cur = con.execute("SELECT * FROM claims WHERE key = ? AND released IS NULL AND project_id = ? ORDER BY id DESC",
                           (key, p["id"])).fetchone()
         taken = None
-        if cur and cur["owner"] == user["name"]:      # same owner again: idempotent, only refresh what was passed
+        if cur and cur["owner"] == user["name"]:      # same owner again: idempotent, extend the lifetime, refresh what was passed
+            con.execute("UPDATE claims SET expires = ? WHERE id = ?", (expires, cur["id"]))
             for k, v in vals.items():
                 if data.get(k) is not None:
                     con.execute(f"UPDATE claims SET {k} = ? WHERE id = ?", (v if k == "topic" else (v or None), cur["id"]))
             row = con.execute("SELECT * FROM claims WHERE id = ?", (cur["id"],)).fetchone()
             return {"claim": claim_dict(row), "created": False}
+        if cur and cur["expires"] is not None and cur["expires"] < time.time():
+            taken = release_claim(cur, "истекла")      # a lapsed claim is free for anyone, no --force needed
+            res_expired, cur = taken, None
+        else:
+            res_expired = None
         if cur:
             if not data.get("force"):
                 raise ApiError(409, f"«{cur['display_key']}» уже занято: {cur['owner']}", holder=claim_dict(cur))
             taken = release_claim(cur, f"перехвачено {user['name']}")
         cid = con.execute("INSERT INTO claims(key, display_key, topic, owner, owner_kind, host, note, until, created,"
-                          " project_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                          " project_id, expires) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                           (key, display, vals["topic"], user["name"], user["kind"], h.host(), vals["note"] or None,
-                           vals["until"] or None, time.time(), p["id"])).lastrowid
+                           vals["until"] or None, time.time(), p["id"], expires)).lastrowid
         res = {"claim": claim_dict(con.execute("SELECT * FROM claims WHERE id = ?", (cid,)).fetchone()), "created": True}
-        if taken:
+        if res_expired:
+            res["expired_released"] = res_expired
+        elif taken:
             res["taken_over"] = taken
         return res
 
