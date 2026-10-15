@@ -363,15 +363,15 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
       <button class="primary" type="submit">Войти и вступить в проект</button>
     </form>
     <div id="joinAgent" class="hidden">
-      <p class="muted" style="margin:0 0 6px">Это приглашение для агента. Передай ему команду (она одноразовая):</p>
-      <input id="joinCmd" readonly style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12.5px">
+      <p class="muted" style="margin:0 0 6px">Передай этот текст своему агенту: он сам подключится и настроит клиент.</p>
+      <textarea id="joinCmd" readonly rows="8" style="width:100%;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;resize:vertical"></textarea>
     </div>
     <div class="err" id="joinErr"></div>
   </div>
 </div>
 
 <div id="invDialog" class="hidden" style="position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px">
-  <div class="panel" style="width:100%;max-width:440px">
+  <div class="panel" style="width:100%;max-width:440px;max-height:85dvh;overflow:auto">
     <h2 style="font-size:16px;margin:0 0 10px">Пригласить</h2>
     <div id="invPick" class="hidden">
       <p class="muted" style="font-size:12.5px;margin:0 0 6px">Из твоих проектов — добавятся сразу, без ссылки:</p>
@@ -388,7 +388,8 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
     <p id="invNote" class="muted" style="font-size:12.5px;margin:0 0 8px"></p>
     <div class="actions"><button class="primary" id="invCreate">Создать ссылку</button><button id="invClose">Закрыть</button></div>
     <div id="invResult" class="hidden" style="margin-top:10px">
-      <div style="display:flex;gap:6px"><input id="invLink" readonly style="flex:1;min-width:0;font-size:12.5px"><button id="invCopy">Копировать</button></div>
+      <textarea id="invLink" readonly rows="1" style="width:100%;min-width:0;font-size:12.5px;resize:vertical"></textarea>
+      <button id="invCopy" style="width:100%;margin-top:6px">Копировать</button>
       <button id="invShare" class="primary hidden" style="width:100%;margin-top:8px">Поделиться…</button>
       <p id="invHint" class="muted" style="font-size:12.5px;margin:6px 0 0"></p>
     </div>
@@ -1179,6 +1180,7 @@ async function loadPresence() {
     MEMBER_ACTS = {};
     $("presence").innerHTML = me.users.map(u => {
       const txt = u.listening ? (u.kind === "agent" ? "слушает" : "в сети")
+        : u.last_check && u.last_check > (u.last_listen || "") ? `проверял входящие ${shortTime(u.last_check)}`
         : u.last_listen ? `был ${shortTime(u.last_listen)}` : "ещё не подключался";
       const acts = [];
       if (owner && u.name !== ME.name && u.kind === "human")
@@ -1313,13 +1315,25 @@ function invNameChanged() {
     : `Новый человек или агент в «${ME.project.title}»: получит одноразовую ссылку на 7 дней. ` +
       `Если у него уже есть аккаунт, по ссылке он войдёт им, второй аккаунт не появится.`;
 }
+function agentConnectText(link, reset) {
+  return `Подключи себя к telegent из папки своего рабочего проекта.\n` +
+    `Найди актуальный клиент tg.py. Если его нет, клонируй: git clone https://github.com/Takymu/telegent\n` +
+    `Выполни из рабочего проекта (путь к tg.py поправь сам):\n` +
+    `python telegent/tg.py connect "${link}"${reset ? " --force" : ""}\n` +
+    `Клиент определится автоматически; если нет, сам выбери --client codex или --client claude.\n` +
+    `Прочитай AGENTS.md рядом с клиентом, проверь whoami и inbox и закончи настройку по выводу команды. ` +
+    `Если установка прервётся, повтори ту же команду. Существующие инструкции и хуки сохраняй, токен не показывай. ` +
+    `Если сам Codex потребует доверия новым хукам, покажи человеку его стандартный запрос; не обходи защиту.`;
+}
 function showInviteResult(d) {
   const agent = d.kind === "agent";
-  $("invLink").value = agent ? `python tg.py join "${d.link}"${d.purpose === "reset" ? " --force" : " --here"}` : d.link;
+  $("invLink").value = agent ? agentConnectText(d.link, d.purpose === "reset") : d.link;
+  $("invLink").rows = agent ? 7 : 2;
+  $("invCopy").textContent = agent ? "Копировать для агента" : "Копировать ссылку";
   const where = ME.project ? `«${ME.project.title}»` : "";
   $("invHint").textContent = (agent
     ? (d.purpose === "reset" ? `Передай агенту ${d.name}: получит новый токен, старый перестанет работать.`
-                             : `Передай эту команду агенту ${d.name}, пусть выполнит её в папке своего проекта: сам получит токен и запишет конфиг.`)
+                             : `Скопируй текст и передай агенту ${d.name}: он сам получит аккаунт, настроит клиент и проверит связь.`)
     : d.purpose === "new" ? `Отправь ссылку ${d.name}: придумает пароль и окажется в проекте ${where}.`
     : d.purpose === "add" ? `Отправь ссылку ${d.name}: войдёт своим паролем и окажется в проекте ${where}.`
                           : `Отправь ссылку ${d.name}: задаст новый пароль, старый перестанет работать.`) +
@@ -1354,9 +1368,10 @@ $("invCreate").onclick = async () => {
   } catch (err) { $("invErr").textContent = err.message; }
 };
 $("invCopy").onclick = async () => {
+  const label = $("invCopy").textContent;
   try { await navigator.clipboard.writeText($("invLink").value); $("invCopy").textContent = "Скопировано"; }
   catch { $("invLink").select(); document.execCommand("copy"); $("invCopy").textContent = "Скопировано"; }
-  setTimeout(() => $("invCopy").textContent = "Копировать", 1500);
+  setTimeout(() => $("invCopy").textContent = label, 1500);
 };
 
 // ---- someone opened an invite link
@@ -1368,7 +1383,7 @@ async function joinFlow(code) {
   const where = inv.project_title ? ` в проект «${inv.project_title}»` : "";
   if (inv.kind === "agent") {
     $("joinInfo").textContent = `Приглашение${where} для агента ${inv.name} (владелец ${inv.owner}).`;
-    $("joinCmd").value = `python tg.py join "${(launcher() || location.origin + "/")}#invite=${code}"${inv.purpose === "reset" ? " --force" : " --here"}`;
+    $("joinCmd").value = agentConnectText(`${(launcher() || location.origin + "/")}#invite=${code}`, inv.purpose === "reset");
     $("joinAgent").classList.remove("hidden");
     return;
   }

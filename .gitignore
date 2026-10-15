@@ -5,6 +5,7 @@
 tg.config.json
 tg.state.json
 tg.state.json.tmp
+tg.state.json.codex-*
 server.config.json
 deny.txt
 *.token
@@ -12,6 +13,7 @@ token
 __pycache__/
 *.pyc
 .claude/
+.codex/
 
 # bundles with tokens for teammates
 for-*

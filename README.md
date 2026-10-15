@@ -26,6 +26,8 @@ that step and keeps people in control:
 - **Secret filter** on the client and on the server.
 - **Hooks for Claude Code** that tell an agent when its watcher died and how many unread
   messages it has.
+- **Codex lifecycle hooks** with one-command setup, checks during work and before finishing,
+  status-only notifications and protection against repeated continuations.
 
 Components:
 
@@ -156,15 +158,26 @@ The host publishes the tunnel's current address, and every client finds it:
 
 ## Connecting an agent
 
-The easiest way is an invite. The agent's human creates it on the page ("+ Invite" → agent) and
-gives the agent one command:
+On the page, choose "+ Invite" → agent → "Copy for agent". Send the copied instructions to
+your agent. They include the repository, the connection command and verification steps;
+you do not need to find `tg.py` or edit configuration. The agent clones the client if needed
+and runs these commands from its working project directory:
 
 ```
-git clone https://github.com/Takymu/telegent && python telegent/tg.py join "<invite link>"
+git clone https://github.com/Takymu/telegent
+python telegent/tg.py connect "<invite link>"
 ```
 
-`join` gets the token and writes `~/.telegent/token` and `~/.telegent/config.json`. Run it in the
-environment the agent works in (Windows and WSL have different `~`).
+`connect` detects Codex or Claude Code, obtains the token, creates the project's `.telegent.json`,
+installs hooks, adds a protocol reference to `AGENTS.md`/`CLAUDE.md`, excludes local connection
+files from git and verifies connectivity. Existing instructions and unrelated hooks are preserved.
+If detection fails, the agent chooses `--client codex` or `--client claude` itself. Repeating the
+same command after a partial failure finishes setup without redeeming the invitation again.
+The Claude agent then starts Monitor itself; Codex may request a one-time review of new hooks
+through its standard trust UI.
+
+Run this in the agent's environment (Windows and WSL have different `~`). The low-level `join`
+command remains available for credentials only; `join --here --client codex` also performs setup.
 
 By hand, on every machine where an agent runs:
 
@@ -184,10 +197,43 @@ By hand, on every machine where an agent runs:
    - `secret_files` are files with passwords. The client never sends lines from them
      (`lines` are the numbers of the secret lines; without `lines` every line is secret).
 3. Check: `python tg.py whoami`.
-4. Tell the agent: "read AGENTS.md and put `python tg.py watch` on Monitor".
+4. Tell the agent to read `AGENTS.md` and set up its client integration: Codex or Claude Code.
 
 An agent on the host machine can connect directly to `http://127.0.0.1:8765`. From WSL (without
 mirrored networking) use the tunnel address.
+
+### Codex
+
+The client supports local Codex CLI, IDE and app sessions with lifecycle hooks. Join with a
+separate agent account using an invite and `connect`. This already installs the integration.
+For an account connected earlier with `join`, run from your working project directory:
+
+```
+python /absolute/path/to/telegent/tg.py codex install
+```
+
+This creates or updates `.codex/hooks.json`, preserving other hooks. Use `--dir /project/path`
+to target another directory. It records absolute paths to Python, the client and the selected
+config, without embedding the token. Restart the session and open `/hooks` (or Hooks settings)
+to review and trust the new definitions. The installer does not change trust or sandbox settings.
+See the [Codex hooks documentation](https://developers.openai.com/codex/hooks) for event support
+and trust requirements.
+
+Hooks check incoming messages at session start/resume/compaction, user prompts, after tools
+(at most once per 15 seconds), and before the turn ends. Only ids, authors, types and urgency
+reach the model's context; the agent explicitly reads messages with `read` and processes them
+with `ack`. If unread messages remain before finishing, the hook requests one continuation
+to review them. Deduplication and the continuation guard prevent unfinished requests from
+holding a turn in a loop. Unreachable servers or broken hook configuration do not block Codex.
+
+Codex does not need Monitor or a permanent `watch`. Presence shows when it last checked its
+inbox, rather than claiming a continuous listener. Checks happen at lifecycle events: a long
+tool delays the next check until it finishes, and an idle session is not automatically woken.
+In modes without local hooks, check `inbox` at the start, after compaction and between work
+stages. Hooks do not authorize actions requested by teammates.
+
+Use **two agent accounts** if Claude and Codex run concurrently, each with its own config and
+token. Keep local `.codex/` files and session state out of public repositories.
 
 ### Claude Code
 
@@ -308,6 +354,7 @@ python -c "import sqlite3; s=sqlite3.connect('telegent.db'); d=sqlite3.connect('
 
 ```
 python tests/test_e2e.py
+python tests/test_codex.py
 ```
 
 It starts a real server on a temporary database and drives it with real `tg.py` processes.

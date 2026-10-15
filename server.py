@@ -183,6 +183,7 @@ def db():
         _db.executescript(SCHEMA)
         for table, col, decl in (("receipts", "delivered_ts", "REAL"), ("users", "last_seen_ts", "REAL"),
                                  ("users", "last_wait_ts", "REAL"), ("users", "pw_hash", "TEXT"),
+                                 ("users", "last_check_ts", "REAL"),
                                  ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
                                  ("messages", "project_id", "INTEGER"), ("claims", "project_id", "INTEGER"),
                                  ("invites", "project_id", "INTEGER"), ("invites", "role", "TEXT")):
@@ -513,14 +514,16 @@ LISTEN_WINDOW = 75
 _touched = {}
 
 
-def touch(user, waiting=False):
+def touch(user, waiting=False, checking=False):
     now = time.time()
-    key = (user["name"], waiting)
+    key = (user["name"], "check" if checking else waiting)
     if now - _touched.get(key, 0) < 15:
         return
     _touched[key] = now
     with DB_LOCK:
-        if waiting:
+        if checking:
+            db().execute("UPDATE users SET last_seen_ts = ?, last_check_ts = ? WHERE name = ?", (now, now, user["name"]))
+        elif waiting:
             db().execute("UPDATE users SET last_seen_ts = ?, last_wait_ts = ? WHERE name = ?", (now, now, user["name"]))
         else:
             db().execute("UPDATE users SET last_seen_ts = ? WHERE name = ?", (now, user["name"]))
@@ -529,7 +532,8 @@ def touch(user, waiting=False):
 def presence(row, now=None):
     now = now or time.time()
     lw = row["last_wait_ts"]
-    return {"listening": bool(lw and now - lw < LISTEN_WINDOW), "last_listen": iso(lw), "last_seen": iso(row["last_seen_ts"])}
+    return {"listening": bool(lw and now - lw < LISTEN_WINDOW), "last_listen": iso(lw),
+            "last_check": iso(row["last_check_ts"]), "last_seen": iso(row["last_seen_ts"])}
 
 
 def users_with_presence(pid):
@@ -1424,14 +1428,19 @@ def api_member_role(h, user, q, data):
 def api_summary(h, user, q, data):
     """One round trip for agent hooks: am I listening, and what is still unacked."""
     p = project_for(h, user, q)
+    if q.get("client") == "codex":
+        touch(user, checking=True)
     with DB_LOCK:
         me = presence(user)
         unacked = list_messages(user, {"for_me": "1", "unacked": "1", "full": "0", "limit": "1000"}, p["id"])
         shown = unacked[-max(1, min(int(q.get("limit") or 10), 50)):]
         if shown:
             mark(user, [m["id"] for m in shown], "delivered")
-        claims = [{k: c[k] for k in ("id", "key", "owner", "topic", "until", "created")}
-                  for c in list_claims({"active": "1"}, p["id"])]
+        claims = [] if q.get("metadata") == "1" else [
+            {k: c[k] for k in ("id", "key", "owner", "topic", "until", "created")}
+            for c in list_claims({"active": "1"}, p["id"])]
+    if q.get("metadata") == "1":
+        shown = [{k: m[k] for k in ("id", "author", "type", "priority", "read")} for m in shown]
     return {"name": user["name"], "listening": me["listening"], "last_listen": me["last_listen"],
             "unacked_total": len(unacked), "unacked": shown, "last_id": LAST_ID[0], "claims": claims}
 
@@ -1465,7 +1474,7 @@ def api_send(h, user, q, data):
                     warnings.append(f"у тебя нет активной заявки «{str(data['claim'])[:80]}» — сообщение принято, снимать нечего")
         m = get_message_row(mid)
         expected = set(expected_recipients(p["id"], user["name"], recipients_list(m["recipients"])))
-        offline = [dict(name=u["name"], last_listen=u["last_listen"]) for u in users_with_presence(p["id"])
+        offline = [dict(name=u["name"], last_listen=u["last_listen"], last_check=u["last_check"]) for u in users_with_presence(p["id"])
                    if u["name"] in expected and not u["listening"]]
     res = {"id": mid, "duplicate": dup, "not_listening": offline}
     if warnings:
