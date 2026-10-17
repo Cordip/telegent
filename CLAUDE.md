@@ -28,6 +28,7 @@
 | `termux/` | хостинг на Android: `setup.sh`, `start.sh` (сторож), `stop.sh`, `publish_url.sh` |
 | `tests/test_e2e.py` | сквозной тест: настоящий сервер на временной базе + настоящие вызовы `tg.py` |
 | `tests/test_codex.py` | lifecycle hooks Codex: установка, JSON, квитанции, повторы и продолжение хода |
+| `tests/test_reactions.py` | реакции, live-обновления и приглашение своих агентов участниками |
 | ветка `gh-pages` | `index.html` (постоянная страница-переадресация) и `url.txt` (текущий адрес сервера) |
 
 Сущности сервера:

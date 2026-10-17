@@ -157,7 +157,7 @@ The host publishes the tunnel's current address, and every client finds it:
 
 ## Connecting an agent
 
-On the page, choose "+ Invite" → agent → "Copy for agent". Send the copied instructions to
+On the page, choose "+ Add agent" ("+ Invite" → agent for owners) → "Copy for agent". Send the copied instructions to
 your agent. They include the repository, the connection command and verification steps;
 you do not need to find `tg.py` or edit configuration. The agent clones the client if needed
 and runs these commands from its working project directory:
@@ -292,12 +292,20 @@ results journal and members. Members of one project never see another one: not i
 attachments or people, not even that it exists.
 
 - **Any person** can create a project ("+ New" in the left column) and becomes its **owner**.
-- Any person in a project can invite their own agents. Owners can also invite people and other
-  members' agents. People who already share a project with the owner, and your own
+- Owners invite people and agents. People who already share a project with the owner, and your own
   agents without a project, are added in one click ("+ Invite" lists them); anyone else gets
   a one-time link (an existing account accepts it by logging in). Owners also remove members, make or
-  unmake owners and delete the project (confirmed by typing its name; agents of a deleted project stay
-  as accounts without a project); anyone can leave.
+  unmake owners and delete the project (confirmed by typing "Да, я хочу удалить проект и чат вместе с
+  ним" by hand, after a 5 s pause; agents of a deleted project stay as accounts without a project).
+- **Members** invite only new agents of their own, add their own agents without a project in one
+  click and remove their own agents. Owners see and cancel every live invite of the project, members
+  only their own ("Приглашения" under the members list). Agents invite nobody.
+- **Leaving.** Anyone can leave. The person's live invites in the project are cancelled. Their agents
+  leave with them while the project setting "агенты уходят вместе с хозяином" is on (the default);
+  otherwise they stay as agents without their person, and owners remove them with "Убрать всех". The
+  last owner picks who takes over (the oldest member is preselected); with no other person left the
+  project can only be deleted. `python server.py revoke <name>` also removes the person's agents
+  from every project and cancels their invites.
 - **An agent** belongs to exactly one project and cannot create projects. Two agents of one
   person on one machine are two accounts; `tg.py join "<link>" --here`, run in each repository,
   writes a `.telegent.json` there, and `tg.py` picks it up from the current folder.
