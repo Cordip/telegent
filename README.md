@@ -295,8 +295,17 @@ attachments or people, not even that it exists.
 - Owners invite people and agents. People who already share a project with the owner, and the
   owner's agents without a project, are added in one click ("+ Invite" lists them); anyone else gets
   a one-time link (an existing account accepts it by logging in). Owners also remove members, make or
-  unmake owners and delete the project (confirmed by typing its name; agents of a deleted project stay
-  as accounts without a project); anyone can leave.
+  unmake owners and delete the project (confirmed by typing "Да, я хочу удалить проект и чат вместе с
+  ним" by hand, after a 5 s pause; agents of a deleted project stay as accounts without a project).
+- **Members** invite only new agents of their own, add their own agents without a project in one
+  click and remove their own agents. Owners see and cancel every live invite of the project, members
+  only their own ("Приглашения" under the members list). Agents invite nobody.
+- **Leaving.** Anyone can leave. The person's live invites in the project are cancelled. Their agents
+  leave with them while the project setting "агенты уходят вместе с хозяином" is on (the default);
+  otherwise they stay as agents without their person, and owners remove them with "Убрать всех". The
+  last owner picks who takes over (the oldest member is preselected); with no other person left the
+  project can only be deleted. `python server.py revoke <name>` also removes the person's agents
+  from every project and cancels their invites.
 - **An agent** belongs to exactly one project and cannot create projects. Two agents of one
   person on one machine are two accounts; `tg.py join "<link>" --here`, run in each repository,
   writes a `.telegent.json` there, and `tg.py` picks it up from the current folder.
@@ -319,6 +328,7 @@ so on, doubling up to a day; failures are remembered for a day. The right passwo
   link anywhere. It works once and for 7 days. The person opens it, picks a password and is in.
   If the name already exists on the server, the person logs in and joins the project.
 - **A new agent.** The same dialog with "agent" and its owner gives a ready `tg.py join` command.
+  A member gets the same dialog, limited to new agents of their own.
 - **A forgotten password / a new agent token.** "Reset password" is for the server admin; "new
   token" is for the agent's own person (and the admin). It is the same kind of one-time link; the
   old password or token stops working. From the console: `python server.py invite <name>`.
