@@ -257,6 +257,29 @@ main { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, .15); }
 .mtools button { border: 0; background: transparent; padding: 3px 8px; font-size: 13px; border-radius: 6px; }
 .mtools button:hover { background: var(--chip); }
+.mrow:focus-within .mtools { display: flex; }
+.mreactions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin: 6px 0 3px; }
+.reaction { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 46px;
+  min-height: 30px; padding: 3px 9px; border-radius: 999px; border: 1px solid transparent;
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel)); color: var(--accent); font-size: 12px; font-weight: 650; }
+.reaction.mine { background: var(--accent); color: var(--accent-ink); }
+.reaction:hover { border-color: var(--accent); }
+.reaction:active, .reaction-choice:active { transform: scale(.9); }
+.reaction-emoji { font: 19px/1.2 "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; }
+.reaction-agree { font: 750 15px/1.2 system-ui, sans-serif; letter-spacing: -.6px; }
+.reaction-add { min-width: 30px; padding: 3px 7px; background: transparent; color: var(--muted); font-size: 18px; }
+.reaction-picker { display: flex; justify-content: space-between; gap: 3px; padding: 5px; margin-bottom: 5px;
+  border-bottom: 1px solid var(--line); }
+#menu .reaction-choice { display: inline-flex; align-items: center; justify-content: center; flex: 1; width: 40px;
+  min-height: 44px; border-radius: 50%; padding: 5px; text-align: center; }
+#menu .reaction-choice .reaction-emoji { font-size: 27px; }
+#menu .reaction-choice .reaction-agree { font-size: 21px; }
+#menu .reaction-choice[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+@media (prefers-reduced-motion: no-preference) {
+  .reaction, .reaction-choice { transition: transform .14s, background .14s; }
+  .reaction-picker { animation: reaction-in .15s ease-out; }
+  @keyframes reaction-in { from { opacity: 0; transform: translateY(5px) scale(.96); } }
+}
 @media (hover: hover) { .mrow:hover .mtools, .mrow.menu-open .mtools { display: flex; } }
 .sysrow { text-align: center; font-size: 12.5px; color: var(--muted); padding: 3px 12px; }
 .sysrow a { color: var(--muted); }
@@ -566,6 +589,9 @@ let PROJECT = null, PROJECTS = [], WANT_PROJECT = null, POLL_ABORT = null, UNREA
 // feed: oldest on top, newest at the bottom; one page on open, older pages load when scrolled to the top
 const PAGE = 100;
 let NO_MORE = false, LOADING_OLDER = false, SIG = "", UNSEEN = 0;
+let REACTION_REVISION = null;
+const REACTION_PENDING = new Set();
+const REACTIONS = [["❤️", "Сердечко"], ["🔥", "Огонёк"], ["👍", "Лайк"], ["👎", "Дизлайк"], ["+1", "Согласен (+1)"], ["🤡", "Клоун"]];
 const EXPANDED = new Set();
 
 const $ = id => document.getElementById(id);
@@ -601,9 +627,9 @@ function toast(text, bad) {
 }
 
 // ---- menu: a popover next to the button on desktop, a bottom sheet on phones
-function openMenu(items, anchor, hint) {
+function openMenu(items, anchor, hint, message) {
   const m = $("menu");
-  m.innerHTML = (hint ? `<div class="mhint">${hint}</div>` : "") + items.map(i =>
+  m.innerHTML = (message ? reactionPicker(message) : "") + (hint ? `<div class="mhint">${hint}</div>` : "") + items.map(i =>
     `<button class="${i.cls || ""}" data-act="${i.act}" ${Object.entries(i.data || {}).map(([k, v]) => `data-${k}="${esc(v)}"`).join(" ")}>${i.label}</button>`).join("");
   m.classList.remove("hidden"); $("menuBg").classList.remove("hidden");
   m.style.left = m.style.top = m.style.right = m.style.bottom = "";
@@ -695,6 +721,7 @@ async function setProject(slug) {
   PROJECT = slug; st.set("tg_project", slug);
   if (POLL_ABORT) POLL_ABORT.abort();   // the running long-poll belongs to the previous project
   MSGS = new Map(); LAST = 0; OLDEST = null; SIG = ""; UNSEEN = 0; THREAD = null; NTF.seen = 0;
+  REACTION_REVISION = null;
   UNREAD_FROM = seen(slug);
   try { ME = await api("GET", "/api/me"); }
   catch (e) { if (/проекта/.test(e.message)) { PROJECT = null; return login(TOKEN); } throw e; }
@@ -702,7 +729,8 @@ async function setProject(slug) {
   document.title = ME.project.title + " · telegent";
   $("noProject").classList.add("hidden");
   document.querySelector(".feedtop").classList.remove("hidden");
-  $("inviteBtn").classList.toggle("hidden", ME.project.role !== "owner");
+  $("inviteBtn").classList.toggle("hidden", ME.kind !== "human");
+  $("inviteBtn").textContent = ME.project.role === "owner" ? "+ Пригласить" : "+ Добавить агента";
   $("projects").classList.remove("open"); $("aside").classList.remove("open");
   setupCompose(); resetCompose();
   document.querySelector('[data-tab="feed"]').click();
@@ -836,6 +864,7 @@ async function reload() {
   const q = filterQuery(); q.set("limit", PAGE);
   const res = await api("GET", "/api/messages?" + q);
   MSGS = new Map(res.messages.map(m => [m.id, m]));
+  REACTION_REVISION = res.reaction_revision;
   OLDEST = res.messages.length ? res.messages[0].id : null;
   NO_MORE = res.messages.length < PAGE;
   LAST = Math.max(LAST, res.last_id);
@@ -852,6 +881,7 @@ async function refresh() {
   const stick = nearBottom();
   const fresh = res.messages.filter(m => !MSGS.has(m.id)).length;
   MSGS = new Map(res.messages.map(m => [m.id, m]));
+  REACTION_REVISION = res.reaction_revision;
   if (!OLDEST && res.messages.length) OLDEST = res.messages[0].id;
   LAST = Math.max(LAST, res.last_id);
   ntfNew(res.messages.filter(m => m.id > NTF.seen)); NTF.seen = Math.max(NTF.seen, res.last_id);
@@ -920,6 +950,26 @@ function render(force) {
 const isSys = m => m.type === "status" || m.type === "approval";
 const TYPE_PILL = {request: "просьба", question: "вопрос", result: "результат", alert: "тревога", decision: "решение людей"};
 
+function reactionIcon(emoji) {
+  return `<span class="${emoji === "+1" ? "reaction-agree" : "reaction-emoji"}" aria-hidden="true">${esc(emoji)}</span>`;
+}
+function reactionPicker(m) {
+  return `<div class="reaction-picker" role="group" aria-label="Реакция на сообщение">` + REACTIONS.map(([emoji, label]) => {
+    const mine = (m.reactions || []).some(r => r.emoji === emoji && r.mine);
+    return `<button class="reaction-choice" data-act="react" data-id="${m.id}" data-emoji="${esc(emoji)}"
+      aria-label="${label}" title="${label}" aria-pressed="${mine}">${reactionIcon(emoji)}</button>`;
+  }).join("") + `</div>`;
+}
+function reactionBar(m) {
+  if (!(m.reactions || []).length) return "";
+  return `<div class="mreactions" role="group" aria-label="Реакции">` + m.reactions.map(r => {
+    const label = (REACTIONS.find(([emoji]) => emoji === r.emoji) || [r.emoji, r.emoji])[1];
+    return `<button class="reaction ${r.mine ? "mine" : ""}" data-act="react" data-id="${m.id}" data-emoji="${esc(r.emoji)}"
+      aria-pressed="${r.mine}" aria-label="${esc(label)}: ${r.count}. ${r.mine ? "Убрать свою реакцию" : "Добавить реакцию"}"
+      title="${esc(label + ': ' + r.users.join(', '))}">${reactionIcon(r.emoji)}<span>${r.count}</span></button>`;
+  }).join("") + `<button class="reaction reaction-add" data-act="reactmenu" data-id="${m.id}" title="Добавить реакцию" aria-label="Добавить реакцию">☺+</button></div>`;
+}
+
 function row(m, prev) {
   if (isSys(m)) {
     return `<div class="sysrow" id="m${m.id}">${esc(m.author)}: ${esc(m.subject)}${m.body ? " — " + esc(m.body.split("\n")[0]) : ""} · ${hhmm(m.time)}</div>`;
@@ -929,7 +979,7 @@ function row(m, prev) {
     prev.time.slice(0, 10) === m.time.slice(0, 10) && m.type === "info" && !m.reply_to && m.priority !== "urgent" &&
     !m.needs_approval && !m.to.length === !prev.to.length;
   const cls = ["mrow", grouped ? "grouped" : "", m.priority === "urgent" ? "urgent" : ""].join(" ");
-  let html = `<div class="${cls}" id="m${m.id}" data-msg="${m.id}">`;
+  let html = `<div class="${cls}" id="m${m.id}" data-msg="${m.id}" tabindex="0">`;
   html += grouped ? `<div class="mgutter" title="#${m.id}">${hhmm(m.time)}</div>` : avatar(m.author, m.author_kind);
   html += `<div class="mmain">`;
   if (!grouped) {
@@ -974,6 +1024,7 @@ function row(m, prev) {
       (canDecide ? `<div class="actions"><button class="ok" data-act="approve" data-id="${m.id}">Одобрить</button>` +
         `<button class="bad" data-act="deny" data-id="${m.id}">Отказать</button></div>` : "") + `</div>`;
   }
+  html += reactionBar(m);
   if ((m.receipts || []).length) {   // delivery to each addressee: people oversee who got what
     const read = m.receipts.filter(r => r.read || r.acked), got = m.receipts.filter(r => r.delivered && !r.read && !r.acked),
       wait = m.receipts.filter(r => !r.delivered);
@@ -986,6 +1037,7 @@ function row(m, prev) {
     html += `<div class="mrc ${TYPE_PILL[m.type] ? "" : "soft"}">${parts.join(" · ")}</div>`;
   }
   html += `</div><div class="mtools">` +
+    `<button data-act="reactmenu" data-id="${m.id}" title="Добавить реакцию" aria-label="Добавить реакцию">☺+</button>` +
     `<button data-act="reply" data-id="${m.id}" title="ответить">↩</button>` +
     `<button data-act="thread" data-id="${m.thread_id}" title="вся ветка">≡</button>` +
     (!m.acked && m.author !== ME.name ? `<button data-act="ack" data-id="${m.id}" title="отметить обработанным">✓</button>` : "") +
@@ -1020,7 +1072,7 @@ $("feed").addEventListener("click", e => {
   const m = MSGS.get(+r.dataset.msg);
   if (!m) return;
   r.classList.add("menu-open");
-  openMenu(actionsFor(m), null, `${esc(m.author)} · ${hhmm(m.time)}`);
+  openMenu(actionsFor(m), null, `${esc(m.author)} · ${hhmm(m.time)}`, m);
 });
 
 document.addEventListener("click", async e => {
@@ -1031,6 +1083,29 @@ document.addEventListener("click", async e => {
   if (el.closest("#menu")) closeMenu();
   try {
     switch (el.dataset.act) {
+      case "reactmenu": {
+        const m = MSGS.get(id);
+        el.closest(".mrow").classList.add("menu-open");
+        openMenu([], el, "Выбери реакцию · повторный клик уберёт её", m); break;
+      }
+      case "react": {
+        const project = PROJECT, m = MSGS.get(id), emoji = el.dataset.emoji;
+        const key = `${project}:${id}:${emoji}`;
+        if (!m || REACTION_PENDING.has(key)) break;
+        REACTION_PENDING.add(key);
+        try {
+          const active = !(m.reactions || []).some(r => r.emoji === emoji && r.mine);
+          const res = await api("POST", `/api/messages/${id}/reaction`, {emoji, active});
+          if (PROJECT === project && MSGS.has(id)) {
+            MSGS.get(id).reactions = res.reactions;
+            const y = SC.scrollTop, stick = nearBottom(); render();
+            if (stick) toBottom(); else SC.scrollTop = y;
+            const buttons = [...document.querySelectorAll(`#m${id} [data-act="react"]`)];
+            (buttons.find(b => b.dataset.emoji === emoji) || document.querySelector(`#m${id} [data-act="reactmenu"]`))?.focus({preventScroll: true});
+          }
+        } finally { REACTION_PENDING.delete(key); }
+        break;
+      }
       case "expand": {
         const b = document.querySelector(`[data-body="${id}"]`); b.classList.toggle("collapsed");
         if (b.classList.contains("collapsed")) EXPANDED.delete(id); else EXPANDED.add(id);
@@ -1050,7 +1125,7 @@ document.addEventListener("click", async e => {
       case "more": {
         const m = MSGS.get(id);
         el.closest(".mrow").classList.add("menu-open");
-        openMenu(actionsFor(m), el);
+        openMenu(actionsFor(m), el, null, m);
         break;
       }
       case "copytext": {
@@ -1318,8 +1393,12 @@ async function loadCandidates() {
 }
 
 function openInvite(name) {
+  CANDS = [];
+  $("invNames").innerHTML = "";
+  const owner = ME.project.role === "owner";
+  $("invKind").innerHTML = (owner ? '<option value="human">человек</option>' : '') + '<option value="agent">агент</option>';
   $("invName").value = name || ""; $("invErr").textContent = ""; $("invResult").classList.add("hidden");
-  $("invOwner").innerHTML = ME.users.filter(u => u.kind === "human").map(u =>
+  $("invOwner").innerHTML = ME.users.filter(u => u.kind === "human" && (owner || u.name === ME.name)).map(u =>
     `<option value="${esc(u.name)}" ${u.name === ME.name ? "selected" : ""}>агент для ${esc(u.name)}</option>`).join("");
   invNameChanged();
   $("invPick").classList.add("hidden"); loadCandidates();
@@ -1339,7 +1418,7 @@ function invNameChanged() {
   $("invNote").textContent = u ? `${u.name} уже в проекте.`
     : cand ? (cand.kind === "agent" ? `${cand.name} — твой агент без проекта: добавится сразу.`
                                     : `${cand.name} уже работает с тобой в «${cand.via.join("», «")}»: добавится сразу, без ссылки.`)
-    : `Новый человек или агент в «${ME.project.title}»: получит одноразовую ссылку на 7 дней. ` +
+    : `${ME.project.role === "owner" ? "Новый человек или агент" : "Твой агент"} в «${ME.project.title}»: получит одноразовую ссылку на 7 дней. ` +
       `Если у него уже есть аккаунт, по ссылке он войдёт им, второй аккаунт не появится.`;
 }
 function agentConnectText(link, reset) {
@@ -1727,7 +1806,8 @@ async function poll() {
     if (!PROJECT) { await loadProjects(); await new Promise(r => setTimeout(r, 15000)); continue; }
     try {
       POLL_ABORT = new AbortController();
-      const res = await api("GET", `/api/wait?after=${LAST}&for_me=0&full=0&timeout=25`, null, POLL_ABORT.signal);
+      const revision = REACTION_REVISION == null ? "" : `&reaction_revision=${encodeURIComponent(REACTION_REVISION)}`;
+      const res = await api("GET", `/api/wait?after=${LAST}&for_me=0&full=0&timeout=25${revision}`, null, POLL_ABORT.signal);
       $("conn").className = "dot on"; $("conn").title = "на связи"; delay = 1000; fails = 0;
       if (res.messages.length) {
         LAST = Math.max(LAST, ...res.messages.map(m => m.id));

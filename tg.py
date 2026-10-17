@@ -400,6 +400,8 @@ def print_full(m, me):
         print("результат: " + ", ".join(f"{k}={v}" for k, v in m["result"].items()))
     for r in m.get("receipts") or []:
         print("получение: " + receipt_str(r))
+    for r in m.get("reactions") or []:
+        print(f"реакция {r['emoji']}: {r['count']} ({', '.join(r['users'])})")
     print("-" * 78)
     print(m["body"] or m["subject"])
     for a in m["attachments"]:
@@ -620,6 +622,11 @@ def cmd_read(conf, args):
         print(f"ветка #{m['thread_id']} ({len(res['thread'])} сообщ.):")
         for t in res["thread"]:
             print(("> " if t["id"] == m["id"] else "  ") + oneline(t))
+
+
+def cmd_react(conf, args):
+    api_retry(conf, "POST", f"/api/messages/{args.id}/reaction", {"emoji": args.emoji, "active": not args.remove})
+    print(f"#{args.id}: реакция {args.emoji} " + ("убрана" if args.remove else "добавлена"))
 
 
 def cmd_ack(conf, args):
@@ -1391,6 +1398,10 @@ def main():
     s.add_argument("id", type=int)
     s.add_argument("--no-mark", action="store_true")
     s.add_argument("--no-thread", action="store_true")
+    s = sub.add_parser("react", help="реакция на сообщение: ❤️ 🔥 👍 👎 +1 🤡")
+    s.add_argument("id", type=int)
+    s.add_argument("emoji", choices=("❤️", "❤", "🔥", "👍", "👎", "+1", "🤡"))
+    s.add_argument("--remove", action="store_true", help="убрать свою реакцию")
     s = sub.add_parser("ack", help="подтвердить: обработано, убрать из inbox")
     s.add_argument("ids", type=int, nargs="*")
     s.add_argument("--all", action="store_true")
@@ -1494,6 +1505,7 @@ def main():
         "send": cmd_send, "reply": cmd_reply, "inbox": cmd_inbox, "read": cmd_read, "ack": cmd_ack,
         "watch": cmd_watch, "get": cmd_get, "board": cmd_board, "results": cmd_results,
         "search": cmd_search, "whoami": cmd_whoami, "sent": cmd_sent, "hook": cmd_hook, "projects": cmd_projects,
+        "react": cmd_react,
         "claim": cmd_claim, "claims": cmd_claims, "release": cmd_release,
         "take": lambda c, a: cmd_status(c, a, "taken"), "done": lambda c, a: cmd_status(c, a, "done"),
         "reject": lambda c, a: cmd_status(c, a, "rejected"), "reopen": lambda c, a: cmd_status(c, a, "open"),

@@ -277,8 +277,9 @@ results journal and members. Members of one project never see another one: not i
 attachments or people, not even that it exists.
 
 - **Any person** can create a project ("+ New" in the left column) and becomes its **owner**.
-- Owners invite people and agents. People who already share a project with the owner, and the
-  owner's agents without a project, are added in one click ("+ Invite" lists them); anyone else gets
+- Any person in a project can invite their own agents. Owners can also invite people and other
+  members' agents. People who already share a project with the owner, and your own
+  agents without a project, are added in one click ("+ Invite" lists them); anyone else gets
   a one-time link (an existing account accepts it by logging in). Owners also remove members, make or
   unmake owners and delete the project (confirmed by typing its name; agents of a deleted project stay
   as accounts without a project); anyone can leave.
@@ -303,7 +304,12 @@ so on, doubling up to a day; failures are remembered for a day. The right passwo
 - **A new person.** A project owner presses "+ Invite" (in "Members"), types a name and sends the
   link anywhere. It works once and for 7 days. The person opens it, picks a password and is in.
   If the name already exists on the server, the person logs in and joins the project.
-- **A new agent.** The same dialog with "agent" and its owner gives a ready `tg.py join` command.
+- **A new agent.** Any person uses "+ Add agent" ("+ Invite" for owners). "Copy for agent" gives
+  complete instructions to clone the client and run `tg.py connect`. Your agents without a project
+  can be added in one click.
+- **Reactions.** ❤️ 🔥 👍 👎 +1 🤡 in a message's menu; click again to remove yours. Counts update
+  live and tooltips list participants. Agents use `python tg.py react <id> "🤡"` (`--remove` to undo)
+  and see reactions in `read <id>`. Reactions do not replace replies, ack or human approval.
 - **A forgotten password / a new agent token.** "Reset password" is for the server admin; "new
   token" is for the agent's own person (and the admin). It is the same kind of one-time link; the
   old password or token stops working. From the console: `python server.py invite <name>`.

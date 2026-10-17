@@ -33,6 +33,7 @@ SYSTEM_TYPES = ("status", "approval")
 TRACKED_TYPES = ("request", "alert", "decision")      # these carry open/taken/done/rejected
 STATES = ("open", "taken", "done", "rejected")
 PRIORITIES = ("normal", "urgent")
+REACTION_EMOJI = ("❤️", "🔥", "👍", "👎", "+1", "🤡")
 RESULT_FIELDS = ("metric", "dataset", "value", "err", "baseline", "commit", "weights", "note")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 
@@ -144,6 +145,9 @@ CREATE INDEX IF NOT EXISTS ix_att_msg ON attachments(message_id);
 CREATE TABLE IF NOT EXISTS receipts(
   user TEXT NOT NULL, message_id INTEGER NOT NULL, read_ts REAL, ack_ts REAL,
   PRIMARY KEY(user, message_id));
+CREATE TABLE IF NOT EXISTS reactions(
+  message_id INTEGER NOT NULL, user TEXT NOT NULL, emoji TEXT NOT NULL, ts REAL NOT NULL,
+  PRIMARY KEY(message_id, user, emoji));
 CREATE TABLE IF NOT EXISTS board(
   project_id INTEGER NOT NULL DEFAULT 0, name TEXT NOT NULL, now TEXT, next TEXT, gpu_until TEXT, note TEXT, ts REAL,
   PRIMARY KEY(project_id, name));
@@ -169,6 +173,8 @@ CREATE INDEX IF NOT EXISTS ix_claims_key ON claims(key);
 DB_LOCK = threading.RLock()
 NEW_MSG = threading.Condition()
 LAST_ID = [0]
+REACTION_EPOCH = secrets.token_hex(8)
+REACTION_REVISIONS = {}
 _db = None
 TG_QUEUE = queue.Queue()
 
@@ -468,8 +474,11 @@ def redeem_invite(code, password=None, label="", me=None, as_existing=False):
         con.execute("BEGIN IMMEDIATE")
         try:
             # re-check under the lock: a link works once
-            if con.execute("SELECT used_ts FROM invites WHERE code_hash = ?", (inv["code_hash"],)).fetchone()["used_ts"]:
+            current = con.execute("SELECT used_ts FROM invites WHERE code_hash = ?", (inv["code_hash"],)).fetchone()
+            if not current or current["used_ts"]:
                 raise ApiError(410, "приглашение уже использовано")
+            if kind == "agent" and purpose != "reset" and not member_role(inv["project_id"], inv["owner"]):
+                raise ApiError(410, "владелец агента больше не состоит в проекте; попроси новое приглашение")
             con.execute("UPDATE invites SET used_ts = ? WHERE code_hash = ?", (time.time(), inv["code_hash"]))
             pw = hash_password(password) if kind == "human" and purpose != "add" else None
             if purpose == "new":
@@ -572,7 +581,10 @@ def msg_dicts(rows, me=None, full=True):
     ids = [r["id"] for r in rows]
     qs = ",".join("?" * len(ids))
     con = db()
-    atts, receipts, approvals = {}, {}, {}
+    atts, receipts, approvals, reactions = {}, {}, {}, {}
+    for reaction in con.execute(f"SELECT * FROM reactions WHERE message_id IN ({qs}) ORDER BY ts, user", ids):
+        groups = reactions.setdefault(reaction["message_id"], {})
+        groups.setdefault(reaction["emoji"], []).append(reaction["user"])
     for a in con.execute(f"SELECT id, message_id, name, size, md5, link, content IS NOT NULL AS inl "
                          f"FROM attachments WHERE message_id IN ({qs}) ORDER BY id", ids):
         atts.setdefault(a["message_id"], []).append(
@@ -598,6 +610,9 @@ def msg_dicts(rows, me=None, full=True):
             "reply_to": r["reply_to"], "thread_id": r["thread_id"],
             "needs_approval": bool(r["needs_approval"]), "approver": r["approver"],
             "approvals": approvals.get(r["id"], []),
+            "reactions": [{"emoji": emoji, "count": len(names), "mine": me in names, "users": names}
+                          for emoji in REACTION_EMOJI
+                          for names in [reactions.get(r["id"], {}).get(emoji, [])] if names],
             "status": None if r["status"] is None else {
                 "state": r["status"], "by": r["status_by"], "time": iso(r["status_ts"]),
                 "ref": r["status_ref"], "note": r["status_note"]},
@@ -1202,12 +1217,28 @@ def require_owner(p):
         raise ApiError(403, f"это может только владелец проекта «{p['slug']}»")
 
 
+def require_human(user):
+    if user["kind"] != "human":
+        raise ApiError(403, "приглашает и добавляет участников только человек")
+
+
 @route("POST", "/api/invites")
 def api_invite_create(h, user, q, data):
-    """Owner of a project: a new person / agent, or an existing account, into this project."""
+    """People may invite their own agents; owners may also invite people and others' agents."""
     p = project_for(h, user, q)
-    require_owner(p)
-    inv = create_invite(user["name"], str(data.get("name") or "").strip(), data.get("kind"), data.get("owner"), p["id"])
+    require_human(user)
+    name = str(data.get("name") or "").strip()
+    with DB_LOCK:
+        if p["role"] != "owner":
+            existing = db().execute("SELECT kind,owner FROM users WHERE lower(name)=lower(?)", (name,)).fetchone()
+            pending = db().execute("SELECT kind,owner FROM invites WHERE lower(name)=lower(?) AND project_id=? "
+                                   "AND purpose!='reset' AND used_ts IS NULL AND expires_ts>?",
+                                   (name, p["id"], time.time())).fetchall()
+            if (data.get("kind") != "agent" or (data.get("owner") or user["name"]) != user["name"]
+                    or any(r["kind"] != "agent" or r["owner"] != user["name"]
+                           for r in ([existing] if existing else []) + pending)):
+                raise ApiError(403, "участник может пригласить своего агента; людей приглашает владелец проекта")
+        inv = create_invite(user["name"], name, data.get("kind"), data.get("owner"), p["id"])
     inv["link"] = invite_link(h, inv["code"])
     inv["project"] = p["slug"]
     return inv
@@ -1231,10 +1262,11 @@ def api_reset(h, user, q, data):
 @route("GET", "/api/invites")
 def api_invite_list(h, user, q, data):
     p = project_for(h, user, q)
-    require_owner(p)
+    require_human(user)
     with DB_LOCK:
         rows = db().execute("SELECT * FROM invites WHERE project_id = ? AND used_ts IS NULL AND expires_ts > ? "
-                            "ORDER BY created_ts DESC", (p["id"], time.time())).fetchall()
+                            "AND (? OR created_by=?) ORDER BY created_ts DESC",
+                            (p["id"], time.time(), p["role"] == "owner", user["name"])).fetchall()
     return {"invites": [{"name": r["name"], "kind": r["kind"], "purpose": r["purpose"], "by": r["created_by"],
                          "expires": iso(r["expires_ts"])} for r in rows]}
 
@@ -1242,10 +1274,11 @@ def api_invite_list(h, user, q, data):
 @route("POST", "/api/invites/cancel")
 def api_invite_cancel(h, user, q, data):
     p = project_for(h, user, q)
-    require_owner(p)
+    require_human(user)
     with DB_LOCK:
-        n = db().execute("DELETE FROM invites WHERE project_id = ? AND name = ? AND used_ts IS NULL",
-                         (p["id"], str(data.get("name") or ""))).rowcount
+        n = db().execute("DELETE FROM invites WHERE project_id = ? AND name = ? AND used_ts IS NULL "
+                         "AND (? OR created_by=?)",
+                         (p["id"], str(data.get("name") or ""), p["role"] == "owner", user["name"])).rowcount
     return {"ok": True, "cancelled": n}
 
 
@@ -1343,7 +1376,7 @@ def api_project_delete(h, user, q, data):
         n = con.execute("SELECT COUNT(*) FROM messages WHERE project_id = ?", (pid,)).fetchone()[0]
         con.execute("BEGIN IMMEDIATE")
         try:
-            for table in ("attachments", "receipts", "approvals"):
+            for table in ("attachments", "receipts", "approvals", "reactions"):
                 con.execute(f"DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE project_id = ?)", (pid,))
             for table in ("messages", "board", "claims", "invites", "members"):
                 con.execute(f"DELETE FROM {table} WHERE project_id = ?", (pid,))
@@ -1375,20 +1408,21 @@ def addable(con, me, pid):
 @route("GET", "/api/members/candidates")
 def api_member_candidates(h, user, q, data):
     p = project_for(h, user, q)
-    require_owner(p)
+    require_human(user)
     with DB_LOCK:
-        return {"candidates": addable(db(), user, p["id"])}
+        return {"candidates": [c for c in addable(db(), user, p["id"])
+                               if p["role"] == "owner" or c["kind"] == "agent"]}
 
 
 @route("POST", "/api/members/add")
 def api_member_add(h, user, q, data):
     p = project_for(h, user, q)
-    require_owner(p)
+    require_human(user)
     name = str(data.get("name") or "")
     with DB_LOCK:
         con = db()
         ok = next((c for c in addable(con, user, p["id"]) if c["name"] == name), None)
-        if not ok:
+        if not ok or (p["role"] != "owner" and ok["kind"] != "agent"):
             raise ApiError(403, f"напрямую добавляются только люди из твоих общих проектов и твои агенты без проекта; "
                                 f"{name} пригласи ссылкой")
         add_member(con, p["id"], name, "agent" if ok["kind"] == "agent" else "member", user["name"])
@@ -1417,6 +1451,8 @@ def api_member_remove(h, user, q, data):
         # their agents in this project go too: an agent without its person makes no sense here
         db().execute("DELETE FROM members WHERE project_id = ? AND user IN "
                      "(SELECT name FROM users WHERE kind = 'agent' AND owner = ?)", (p["id"], name))
+        db().execute("DELETE FROM invites WHERE project_id=? AND kind='agent' AND owner=? AND used_ts IS NULL",
+                     (p["id"], name))
     return {"ok": True}
 
 
@@ -1425,7 +1461,7 @@ def rename_account(con, old, new):
     board, claims, invites. Tokens and sessions keep working (they are bound to hashes, not names)."""
     con.execute("UPDATE users SET name = ? WHERE name = ?", (new, old))
     for table, cols in (("users", ["owner"]), ("messages", ["author", "owner", "status_by"]),
-                        ("receipts", ["user"]), ("approvals", ["user"]), ("sessions", ["user"]),
+                        ("receipts", ["user"]), ("approvals", ["user"]), ("reactions", ["user"]), ("sessions", ["user"]),
                         ("members", ["user", "added_by"]), ("board", ["name"]), ("claims", ["owner"]),
                         ("invites", ["name", "owner", "created_by"]), ("projects", ["created_by"])):
         for col in cols:
@@ -1521,7 +1557,7 @@ def api_list(h, user, q, data):
         msgs = list_messages(user, q, p["id"])
         if q.get("for_me") == "1" and msgs:
             mark(user, [m["id"] for m in msgs], "delivered")
-        return {"messages": msgs, "last_id": LAST_ID[0]}
+        return {"messages": msgs, "last_id": LAST_ID[0], "reaction_revision": reaction_revision(p["id"])}
 
 
 @route("POST", "/api/messages")
@@ -1568,6 +1604,38 @@ def api_get(h, user, q, data, mid):
     return {"message": msg, "thread": thread}
 
 
+def reaction_revision(pid):
+    return REACTION_EPOCH + ":" + str(REACTION_REVISIONS.get(pid, 0))
+
+
+@route("POST", r"/api/messages/(\d+)/reaction")
+def api_reaction(h, user, q, data, mid):
+    with DB_LOCK:
+        message = get_message_row(mid, user)
+        if not isinstance(data, dict):
+            raise ApiError(400, "нужны emoji и active (true или false)")
+        emoji, active = data.get("emoji"), data.get("active", True)
+        if emoji == "❤":
+            emoji = "❤️"
+        if emoji not in REACTION_EMOJI or type(active) is not bool:
+            raise ApiError(400, "реакция: ❤️, 🔥, 👍, 👎, +1, 🤡; active: true | false")
+        if message["type"] in SYSTEM_TYPES:
+            raise ApiError(400, "реакции доступны у сообщений участников")
+        con = db()
+        if active:
+            changed = con.execute("INSERT OR IGNORE INTO reactions(message_id,user,emoji,ts) VALUES (?,?,?,?)",
+                                  (mid, user["name"], emoji, time.time())).rowcount
+        else:
+            changed = con.execute("DELETE FROM reactions WHERE message_id=? AND user=? AND emoji=?",
+                                  (mid, user["name"], emoji)).rowcount
+        if changed:
+            with NEW_MSG:
+                pid = message["project_id"]
+                REACTION_REVISIONS[pid] = REACTION_REVISIONS.get(pid, 0) + 1
+                NEW_MSG.notify_all()
+        return {"ok": True, "reactions": msg_dicts([message], user["name"])[0]["reactions"]}
+
+
 @route("POST", r"/api/messages/(\d+)/status")
 def api_status(h, user, q, data, mid):
     sid, _ = set_status(user, h.host(), mid, data)
@@ -1609,17 +1677,18 @@ def api_wait(h, user, q, data):
     while True:
         with NEW_MSG:
             seen = LAST_ID[0]
+            revision = reaction_revision(p["id"])
         with DB_LOCK:
             msgs = list_messages(user, qq, p["id"])
             if msgs and qq["for_me"] == "1":
                 mark(user, [m["id"] for m in msgs], "delivered")
-        if msgs:
-            return {"messages": msgs, "last_id": seen}
+        if msgs or ("reaction_revision" in q and q["reaction_revision"] != revision):
+            return {"messages": msgs, "last_id": seen, "reaction_revision": revision}
         remaining = deadline - time.time()
         if remaining <= 0:
-            return {"messages": [], "last_id": max(seen, after)}
+            return {"messages": [], "last_id": max(seen, after), "reaction_revision": revision}
         with NEW_MSG:
-            if LAST_ID[0] == seen:
+            if LAST_ID[0] == seen and reaction_revision(p["id"]) == revision:
                 NEW_MSG.wait(remaining)
 
 
