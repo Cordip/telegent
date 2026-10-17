@@ -359,6 +359,15 @@ def main():
         sm = json.loads(urllib.request.urlopen(urllib.request.Request(
             url + "/api/summary", headers={"Authorization": "Bearer " + open(os.path.join(tmp, "alice-agent.token")).read().strip()})).read())
         check([c["key"] for c in sm["claims"]] == ["X3"], "summary carries active claims")
+        urgent_id = int(run(["send", "срочно до остального", "-u", "--to", "alice-agent"], B).stdout.split()[0][1:])
+        for i in range(12):
+            run(["send", f"обычное {i}", "--to", "alice-agent"], B)
+        sm = json.loads(urllib.request.urlopen(urllib.request.Request(
+            url + "/api/summary?limit=10&metadata=1",
+            headers={"Authorization": "Bearer " + open(os.path.join(tmp, "alice-agent.token")).read().strip()})).read())
+        shown = [m["id"] for m in sm["unacked"]]
+        check(urgent_id in shown and len(shown) == 10 and shown == sorted(shown),
+              "summary keeps an urgent message that newer routine mail would push out")
 
         # claim lifetime: expiry, takeover of an expired claim, extension, reminders
         r = run(["claim", "exp42 short", "--hours", "0.0003"], A)
@@ -739,10 +748,14 @@ def main():
         r = run(["inbox", "--all", "--limit", "500"], B)
         check("ally-bot" in r.stdout and "alice-agent(" not in r.stdout, "history shows the new name")
         check("теперь называется ally-bot" in r.stdout, "the project is told about the rename")
+        renamed_req = int(run(["send", "решит alice после переименования", "-t", "request", "--approver", "alice"], B)
+                          .stdout.split()[0][1:])
         code, _ = http("POST", "/api/rename", {"new": "alicia"}, human_tok)
         check(code == 200, "a person renames themselves")
         code, d = http("GET", "/api/me", tok=human_tok)
         check(d["name"] == "alicia" and d["is_admin"], "the person's token keeps working, rights stay")
+        code, d = http("GET", f"/api/messages/{renamed_req}", tok=human_tok)
+        check(code == 200 and d["message"]["approver"] == "alicia", "a rename carries pending approvals to the new name")
         r = run(["whoami"], A)
         check("владелец alicia" in r.stdout, "their agents now belong to the new name")
         http("POST", "/api/password", {"new": "renamed pass 1"}, human_tok)

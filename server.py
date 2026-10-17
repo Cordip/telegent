@@ -515,6 +515,9 @@ def redeem_invite(code, password=None, label="", me=None, as_existing=False):
                         (name, kind, inv["owner"], token_hash(tok), time.time(), pw))
             add_member(con, inv["project_id"], name, inv["role"], inv["created_by"])
         elif purpose == "add":
+            # an old link must not reset the role of someone added meanwhile (e.g. made the only owner)
+            if con.execute("SELECT 1 FROM members WHERE project_id = ? AND user = ?", (inv["project_id"], name)).fetchone():
+                raise ApiError(409, f"{name} уже в проекте «{inv['project_title']}»")
             add_member(con, inv["project_id"], name, "member" if as_existing else inv["role"], inv["created_by"])
         elif kind == "human":
             con.execute("UPDATE users SET pw_hash = ? WHERE name = ?", (pw, name))
@@ -839,6 +842,9 @@ def list_messages(me, q, pid):
     if q.get("author"):
         where.append("m.author = ?")
         args.append(q["author"])
+    if q.get("priority"):
+        where.append("m.priority = ?")
+        args.append(q["priority"])
     if q.get("thread"):
         where.append("m.thread_id = ?")
         args.append(int(q["thread"]))
@@ -925,18 +931,21 @@ def set_approval(me, host, mid, data):
         raise ApiError(400, "decision: approve | deny")
     note = str(data.get("note") or "")[:5000]
     check_secret("note", note)
-    m = get_message_row(mid, me)
-    if not m["needs_approval"]:
-        raise ApiError(400, f"#{mid} не просит одобрения")
-    if m["approver"] and m["approver"] != me["name"]:
-        raise ApiError(403, f"решение по #{mid} принимает только {m['approver']}")
     now = time.time()
-    with DB_LOCK:
-        db().execute("INSERT OR REPLACE INTO approvals(message_id, user, decision, note, ts) VALUES (?,?,?,?,?)",
-                     (mid, me["name"], decision, note or None, now))
+    # read, authorize and record in one transaction: a person removed meanwhile decides nothing
+    with write_tx() as con:
+        m = con.execute("SELECT * FROM messages WHERE id = ?", (mid,)).fetchone()
+        if not m or not active_role(con, m["project_id"], me["name"]):
+            raise ApiError(404, f"сообщения #{mid} нет")
+        if not m["needs_approval"]:
+            raise ApiError(400, f"#{mid} не просит одобрения")
+        if m["approver"] and m["approver"] != me["name"]:
+            raise ApiError(403, f"решение по #{mid} принимает только {m['approver']}")
+        con.execute("INSERT OR REPLACE INTO approvals(message_id, user, decision, note, ts) VALUES (?,?,?,?,?)",
+                    (mid, me["name"], decision, note or None, now))
         if m["type"] == "decision":
-            db().execute("UPDATE messages SET status = ?, status_by = ?, status_ts = ? WHERE id = ?",
-                         ("done" if decision == "approve" else "rejected", me["name"], now, mid))
+            con.execute("UPDATE messages SET status = ?, status_by = ?, status_ts = ? WHERE id = ?",
+                        ("done" if decision == "approve" else "rejected", me["name"], now, mid))
     word = "ОДОБРЕНО" if decision == "approve" else "ОТКАЗАНО"
     return insert_message(me, host, {
         "type": "approval", "reply_to": mid, "subject": f"#{mid} {word} ({me['name']}): {m['subject'][:80]}",
@@ -1393,17 +1402,17 @@ def api_project_delete(h, user, q, data):
     require_owner(p)
     if " ".join(str(data.get("confirm") or "").split()) != DELETE_PHRASE:
         raise ApiError(400, f"для подтверждения введи: {DELETE_PHRASE}")
-    with DB_LOCK:
-        con = db()
-        pid = p["id"]
+    pid = p["id"]
+    with write_tx() as con:
+        if active_role(con, pid, user["name"]) != "owner":
+            raise ApiError(403, f"это может только владелец проекта «{p['slug']}»")
         agents = [r["user"] for r in con.execute("SELECT user FROM members WHERE project_id = ? AND role = 'agent'", (pid,))]
         n = con.execute("SELECT COUNT(*) FROM messages WHERE project_id = ?", (pid,)).fetchone()[0]
-        with write_tx() as con:
-            for table in ("attachments", "receipts", "approvals", "reactions"):
-                con.execute(f"DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE project_id = ?)", (pid,))
-            for table in ("messages", "board", "claims", "invites", "members"):
-                con.execute(f"DELETE FROM {table} WHERE project_id = ?", (pid,))
-            con.execute("DELETE FROM projects WHERE id = ?", (pid,))
+        for table in ("attachments", "receipts", "approvals", "reactions"):
+            con.execute(f"DELETE FROM {table} WHERE message_id IN (SELECT id FROM messages WHERE project_id = ?)", (pid,))
+        for table in ("messages", "board", "claims", "invites", "members"):
+            con.execute(f"DELETE FROM {table} WHERE project_id = ?", (pid,))
+        con.execute("DELETE FROM projects WHERE id = ?", (pid,))
     return {"ok": True, "deleted": p["slug"], "messages": n, "agents_without_project": agents}
 
 
@@ -1524,7 +1533,7 @@ def rename_account(con, old, new):
     """Rename everywhere: the account, its history, recipients, receipts, approvals, sessions, memberships,
     board, claims, invites. Tokens and sessions keep working (they are bound to hashes, not names)."""
     con.execute("UPDATE users SET name = ? WHERE name = ?", (new, old))
-    for table, cols in (("users", ["owner"]), ("messages", ["author", "owner", "status_by"]),
+    for table, cols in (("users", ["owner"]), ("messages", ["author", "owner", "status_by", "approver"]),
                         ("receipts", ["user"]), ("approvals", ["user"]), ("reactions", ["user"]), ("sessions", ["user"]),
                         ("members", ["user", "added_by"]), ("board", ["name"]), ("claims", ["owner"]),
                         ("invites", ["name", "owner", "created_by"]), ("projects", ["created_by"])):
@@ -1598,7 +1607,12 @@ def api_summary(h, user, q, data):
     with DB_LOCK:
         me = presence(user)
         unacked = list_messages(user, {"for_me": "1", "unacked": "1", "full": "0", "limit": "1000"}, p["id"])
-        shown = unacked[-max(1, min(int(q.get("limit") or 10), 50)):]
+        limit = max(1, min(int(q.get("limit") or 10), 50))
+        # urgent first and from their own query, so no amount of routine mail pushes one out
+        urgent = list_messages(user, {"for_me": "1", "unacked": "1", "full": "0", "priority": "urgent",
+                                      "limit": str(limit)}, p["id"])
+        routine = [m for m in unacked if m["priority"] != "urgent"]
+        shown = sorted(urgent + (routine[-(limit - len(urgent)):] if len(urgent) < limit else []), key=lambda m: m["id"])
         if shown:
             mark(user, [m["id"] for m in shown], "delivered")
         claim_fields = ("id", "owner", "created", "expired", "expires_in") if q.get("metadata") == "1" else \

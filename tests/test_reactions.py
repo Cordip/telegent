@@ -175,5 +175,18 @@ class ReactionsTest(unittest.TestCase):
             self.api('POST', '/api/project/delete', {'confirm': DELETE_PHRASE}, 'alice', slug)
 
 
+    def test_an_old_add_invite_keeps_the_current_role(self):
+        slug = self.api('POST', '/api/projects', {'title': 'Role keep'}, 'alice')['project']['slug']
+        try:
+            invite = self.api('POST', '/api/invites', {'name': 'bob'}, 'alice', slug)
+            self.api('POST', '/api/members/add', {'name': 'bob'}, 'alice', slug)
+            self.api('POST', '/api/members/role', {'name': 'bob', 'role': 'owner'}, 'alice', slug)
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.api('POST', '/api/join', {'code': invite['code']}, 'bob')
+            self.assertEqual(error.exception.code, 409)
+            self.assertEqual(self.api('GET', '/api/me', author='bob', project=slug)['project']['role'], 'owner')
+        finally:
+            self.api('POST', '/api/project/delete', {'confirm': DELETE_PHRASE}, 'alice', slug)
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

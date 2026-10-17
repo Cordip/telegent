@@ -209,6 +209,18 @@ class Conflict(Exception):
         self.holder = holder
 
 
+class SameOriginToken(urllib.request.HTTPRedirectHandler):
+    """urllib keeps Authorization on a redirect; the token goes to the configured origin only."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and urllib.parse.urlsplit(newurl)[:2] != urllib.parse.urlsplit(req.full_url)[:2]:
+            new.remove_header("Authorization")
+        return new
+
+
+API_OPENER = urllib.request.build_opener(SameOriginToken)
+
+
 def api(conf, method, path, data=None, timeout=30, raw=False):
     url = conf.server + path
     body = json.dumps(data, ensure_ascii=False).encode("utf-8") if data is not None else None
@@ -217,7 +229,7 @@ def api(conf, method, path, data=None, timeout=30, raw=False):
         "Content-Type": "application/json", "User-Agent": "telegent-tg/1.0",
         **({"X-Telegent-Project": conf.project} if conf.project else {})})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with API_OPENER.open(req, timeout=timeout) as r:
             payload = r.read()
             return (payload, dict(r.headers)) if raw else json.loads(payload.decode("utf-8"))
     except urllib.error.HTTPError as e:

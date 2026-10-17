@@ -501,5 +501,55 @@ class CodexTest(unittest.TestCase):
         self.assertIn("/.telegent.json", (folder / ".git" / "info" / "exclude").read_text(encoding="utf-8"))
 
 
+    def test_summary_keeps_urgent_mail_behind_a_large_backlog(self):
+        urgent = self.send(type="info", priority="urgent")
+        for _ in range(1001):
+            self.send(type="info", priority="normal")
+        summary = self.api("GET", "/api/summary?limit=10&metadata=1")
+        shown = [m["id"] for m in summary["unacked"]]
+        self.assertIn(urgent, shown)
+        self.assertEqual(len(shown), 10)
+        self.assertEqual(shown, sorted(shown))
+
+class RedirectTest(unittest.TestCase):
+    def test_token_goes_to_the_configured_origin_only(self):
+        import http.server
+        import threading
+        spec = importlib.util.spec_from_file_location("tg_redirects", ROOT / "tg.py")
+        tg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tg)
+        seen = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                seen.setdefault(self.server.server_address[1], []).append((self.path, self.headers.get("Authorization")))
+                target = {"/other": other.server_address[1], "/same": main.server_address[1]}.get(self.path)
+                if target:
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{target}/landed")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        main, other = (http.server.HTTPServer(("127.0.0.1", 0), Handler) for _ in range(2))
+        for server in (main, other):
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            conf = type("Conf", (), {"server": f"http://127.0.0.1:{main.server_address[1]}", "token": "SECRET", "project": None})
+            tg.api(conf, "GET", "/other")
+            tg.api(conf, "GET", "/same")
+        finally:
+            for server in (main, other):
+                server.shutdown()
+        self.assertEqual(seen[other.server_address[1]], [("/landed", None)])
+        self.assertIn(("/landed", "Bearer SECRET"), seen[main.server_address[1]])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
